@@ -54,6 +54,8 @@ const db = getFirestore(fbApp);
   // un depurador remoto.
   function showFatalError(err){
     console.error('Error fatal:', err);
+    var loadingEl = document.getElementById('boot-loading');
+    if(loadingEl) loadingEl.remove();
     var detail = (err && err.stack) ? err.stack : (err && err.message) ? err.message : String(err);
     var box = document.getElementById('fatal-error-box');
     if(!box){
@@ -70,6 +72,41 @@ const db = getFirestore(fbApp);
   window.addEventListener('unhandledrejection', function(event){
     showFatalError(event.reason);
   });
+
+  function hideBootLoading(){
+    var el = document.getElementById('boot-loading');
+    if(el) el.remove();
+  }
+
+  // Redimensiona una imagen a un máximo de maxSize x maxSize (manteniendo proporción)
+  // y la devuelve como data URL en JPEG antes de guardarla en Firestore. Esto evita
+  // que fotos de perfil y escudos pesen varios MB en base64 y hagan lenta la carga inicial.
+  function resizeImageToDataUrl(file, maxSize){
+    maxSize = maxSize || 150;
+    return new Promise(function(resolve, reject){
+      var reader = new FileReader();
+      reader.onload = function(ev){
+        var img = new Image();
+        img.onload = function(){
+          var scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+          var outW = Math.max(1, Math.round(img.width * scale));
+          var outH = Math.max(1, Math.round(img.height * scale));
+          var canvas = document.createElement('canvas');
+          canvas.width = outW; canvas.height = outH;
+          var ctx = canvas.getContext('2d');
+          // Relleno de fondo porque JPEG no soporta transparencia (ej. escudos en PNG).
+          ctx.fillStyle = '#F5F1E6';
+          ctx.fillRect(0, 0, outW, outH);
+          ctx.drawImage(img, 0, 0, outW, outH);
+          resolve(canvas.toDataURL('image/jpeg', 0.85));
+        };
+        img.onerror = function(){ reject(new Error('No se pudo leer la imagen')); };
+        img.src = ev.target.result;
+      };
+      reader.onerror = function(){ reject(new Error('No se pudo leer el archivo')); };
+      reader.readAsDataURL(file);
+    });
+  }
 
   /* ---------- FIRESTORE HELPERS ---------- */
   async function loadDoc(name, fallback){
@@ -120,10 +157,21 @@ const db = getFirestore(fbApp);
   function localSet(key, val){ try{ localStorage.setItem(key, val); }catch(e){} }
 
   async function loadAll(){
-    var profilesDoc = await loadDoc('profiles', {list:[]});
+    // Las 6 lecturas son independientes entre sí, así que corren en paralelo
+    // con Promise.all en vez de una por una — esto es lo que más pesa en la
+    // carga inicial, sobre todo en redes móviles con más latencia.
+    var results = await Promise.all([
+      loadDoc('profiles', {list:[]}),
+      loadTeams(),
+      loadDoc('matches', {matches:[], predictions:{}}),
+      loadDoc('preseason', { picks:{}, result:null }),
+      loadDoc('realStandings', { data:{} }),
+      loadDoc('admin', { password:null })
+    ]);
+    var profilesDoc = results[0];
     state.profiles = profilesDoc.list || [];
 
-    state.teams = await loadTeams();
+    state.teams = results[1];
     if(!state.teams.length){
       var legacyTeamsDoc = await loadDoc('teams', null);
       if(legacyTeamsDoc && legacyTeamsDoc.list && legacyTeamsDoc.list.length){
@@ -134,17 +182,16 @@ const db = getFirestore(fbApp);
       await migrateTeamsToSubcollection(state.teams);
     }
 
-    var matchesDoc = await loadDoc('matches', {matches:[], predictions:{}});
+    var matchesDoc = results[2];
     state.matches = matchesDoc.matches || [];
     state.predictions = matchesDoc.predictions || {};
 
-    var psDoc = await loadDoc('preseason', { picks:{}, result:null });
-    state.preseason = psDoc;
+    state.preseason = results[3];
 
-    var rsDoc = await loadDoc('realStandings', { data:{} });
+    var rsDoc = results[4];
     state.realStandings = rsDoc.data || {};
 
-    var adminDoc = await loadDoc('admin', { password:null });
+    var adminDoc = results[5];
     state.adminPassword = adminDoc.password;
 
     state.myId = localGet('profetas-my-id');
@@ -264,18 +311,24 @@ const db = getFirestore(fbApp);
     document.getElementById('photo-file').addEventListener('change', function(e){
       var f = e.target.files[0];
       if(!f) return;
-      var reader = new FileReader();
-      reader.onload = function(ev){
-        pendingPhoto = ev.target.result;
+      var placeholder = document.getElementById('photo-placeholder');
+      if(placeholder) placeholder.textContent = 'Procesando...';
+      resizeImageToDataUrl(f, 150).then(function(dataUrl){
+        pendingPhoto = dataUrl;
         document.getElementById('photo-picker').innerHTML = '<img src="'+pendingPhoto+'">';
-      };
-      reader.readAsDataURL(f);
+      }).catch(function(){
+        alert('No se pudo procesar la imagen.');
+        if(placeholder) placeholder.textContent = 'Foto';
+      });
     });
     document.getElementById('create-profile-btn').addEventListener('click', async function(){
+      var btn = this;
       var name = document.getElementById('new-name').value.trim();
       var pin = document.getElementById('new-pin').value.trim();
       if(!name){ alert('Escribe tu nombre'); return; }
       if(!/^\d{4}$/.test(pin)){ alert('El PIN debe ser de 4 dígitos'); return; }
+      btn.disabled = true;
+      btn.textContent = 'Creando...';
       var newP = { id: uid(), name: name, photo: pendingPhoto, pin: pin };
       state.profiles.push(newP);
       await saveProfiles();
@@ -355,6 +408,8 @@ const db = getFirestore(fbApp);
         var awayInput = el.querySelector('[data-pred-away="'+mid+'"]');
         var h = homeInput.value, a = awayInput.value;
         if(h===''||a===''){ alert('Completa ambos marcadores'); return; }
+        btn.disabled = true;
+        btn.textContent = 'Guardando...';
         if(!state.predictions[mid]) state.predictions[mid] = {};
         state.predictions[mid][state.myId] = { home:h, away:a };
         await saveMatchesAndPredictions();
@@ -517,9 +572,12 @@ const db = getFirestore(fbApp);
     el.innerHTML = html;
     if(!locked){
       document.getElementById('save-preseason').addEventListener('click', async function(){
+        var btn = this;
         var championTeamId = document.getElementById('pick-champion').value;
         var scorerName = document.getElementById('pick-scorer').value.trim();
         if(!championTeamId || !scorerName){ alert('Completa campeón y goleador'); return; }
+        btn.disabled = true;
+        btn.textContent = 'Guardando...';
         state.preseason.picks[state.myId] = { championTeamId:championTeamId, scorerName:scorerName };
         await savePreseason();
         renderPretemporada(el);
@@ -548,10 +606,13 @@ const db = getFirestore(fbApp);
 
     if(isFirstTime){
       document.getElementById('gate-create-btn').addEventListener('click', async function(){
+        var btn = this;
         var p1 = document.getElementById('gate-pass1').value;
         var p2 = document.getElementById('gate-pass2').value;
         if(!p1 || p1.length<4){ alert('Usa al menos 4 caracteres'); return; }
         if(p1!==p2){ alert('Las contraseñas no coinciden'); return; }
+        btn.disabled = true;
+        btn.textContent = 'Creando...';
         state.adminPassword = p1;
         await saveAdminPassword();
         state.adminUnlocked = true;
@@ -669,7 +730,7 @@ const db = getFirestore(fbApp);
     state.teams.forEach(function(t){
       html += '<div class="team-list-item" style="flex-wrap:wrap;">';
       html += '<div style="width:100%;display:flex;align-items:center;gap:8px;">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+t.name+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
-      html += '<div style="width:100%;margin-top:6px;"><label class="btn" style="display:inline-block;cursor:pointer;">Subir escudo<input type="file" accept="image/*" data-logo-file="'+t.id+'" style="display:none;"></label></div>';
+      html += '<div style="width:100%;margin-top:6px;"><label class="btn" style="display:inline-block;cursor:pointer;"><span data-logo-label="'+t.id+'">Subir escudo</span><input type="file" accept="image/*" data-logo-file="'+t.id+'" style="display:none;"></label></div>';
       html += '</div>';
     });
     html += '<div class="form-grid" style="margin-top:12px;">';
@@ -683,7 +744,7 @@ const db = getFirestore(fbApp);
     html += '<div class="card">';
     html += '<div class="section-title">Perfiles y PIN (por si alguien lo olvida)</div>';
     state.profiles.forEach(function(p){
-      html += '<div class="admin-profile-row">'+avatarHtml(p,32)+'<div style="flex:1;font-size:13px;">'+p.name+'</div><span class="pin-pill">'+p.pin+'</span></div>';
+      html += '<div class="admin-profile-row">'+avatarHtml(p,32)+'<div style="flex:1;font-size:13px;">'+p.name+'</div><span class="pin-pill">'+p.pin+'</span><button class="btn btn-danger" data-del-profile="'+p.id+'">Eliminar</button></div>';
     });
     if(!state.profiles.length){ html += '<div class="empty" style="padding:14px 0;">Todavía no hay perfiles creados.</div>'; }
     html += '</div>';
@@ -736,11 +797,14 @@ const db = getFirestore(fbApp);
     });
 
     document.getElementById('add-match-btn').addEventListener('click', async function(){
+      var btn = this;
       var home = document.getElementById('m-home').value;
       var away = document.getElementById('m-away').value;
       var kickoff = document.getElementById('m-kickoff').value;
       var phase = document.getElementById('m-phase').value;
       if(!home || !away || home===away){ alert('Elige dos equipos distintos'); return; }
+      btn.disabled = true;
+      btn.textContent = 'Agregando...';
       state.matches.push({ id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoff || null, phase:phase, homeScore:null, awayScore:null });
       await saveMatchesAndPredictions();
       renderGestionar(el);
@@ -785,6 +849,8 @@ const db = getFirestore(fbApp);
         var h = el.querySelector('[data-res-home="'+mid+'"]').value;
         var a = el.querySelector('[data-res-away="'+mid+'"]').value;
         if(h===''||a===''){ alert('Ingresa el marcador completo'); return; }
+        btn.disabled = true;
+        btn.textContent = 'Guardando...';
         var m = state.matches.find(function(x){return x.id===mid;});
         m.homeScore = parseInt(h); m.awayScore = parseInt(a);
         await saveMatchesAndPredictions();
@@ -799,6 +865,8 @@ const db = getFirestore(fbApp);
         var a = el.querySelector('[data-edit-away="'+mid+'"]').value;
         if(h===''||a===''){ alert('Ingresa el marcador completo'); return; }
         if(!confirm('¿Confirmas actualizar este resultado? Los puntos de todos se recalcularán automáticamente.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Actualizando...';
         var m = state.matches.find(function(x){return x.id===mid;});
         m.homeScore = parseInt(h); m.awayScore = parseInt(a);
         await saveMatchesAndPredictions();
@@ -810,9 +878,28 @@ const db = getFirestore(fbApp);
       btn.addEventListener('click', async function(){
         var mid = btn.getAttribute('data-del-match');
         if(!confirm('¿Eliminar este partido? También se borrarán las predicciones asociadas a él.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Eliminando...';
         state.matches = state.matches.filter(function(m){return m.id!==mid;});
         delete state.predictions[mid];
         await saveMatchesAndPredictions();
+        renderGestionar(el);
+      });
+    });
+
+    el.querySelectorAll('[data-del-profile]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var pid = btn.getAttribute('data-del-profile');
+        if(!confirm('¿Eliminar este perfil? También se borrarán sus predicciones y su pronóstico de pre-temporada.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Eliminando...';
+        state.profiles = state.profiles.filter(function(p){return p.id!==pid;});
+        Object.keys(state.predictions).forEach(function(mid){
+          if(state.predictions[mid] && (pid in state.predictions[mid])) delete state.predictions[mid][pid];
+        });
+        if(state.preseason.picks[pid]) delete state.preseason.picks[pid];
+        await Promise.all([saveProfiles(), saveMatchesAndPredictions(), savePreseason()]);
+        if(state.myId === pid){ state.myId = null; saveMyId(); }
         renderGestionar(el);
       });
     });
@@ -822,23 +909,31 @@ const db = getFirestore(fbApp);
         var tid = input.getAttribute('data-logo-file');
         var f = e.target.files[0];
         if(!f) return;
-        var reader = new FileReader();
-        reader.onload = async function(ev){
+        var label = el.querySelector('[data-logo-label="'+tid+'"]');
+        input.disabled = true;
+        if(label) label.textContent = 'Subiendo...';
+        resizeImageToDataUrl(f, 150).then(async function(dataUrl){
           var t = teamById(tid);
           if(!t) return;
-          t.logoUrl = ev.target.result;
+          t.logoUrl = dataUrl;
           await saveTeam(t);
           renderGestionar(el);
-        };
-        reader.readAsDataURL(f);
+        }).catch(function(){
+          alert('No se pudo procesar la imagen.');
+          input.disabled = false;
+          if(label) label.textContent = 'Subir escudo';
+        });
       });
     });
 
     document.getElementById('add-team-btn').addEventListener('click', async function(){
+      var btn = this;
       var name = document.getElementById('t-name').value.trim();
       var code = document.getElementById('t-code').value.trim().toUpperCase();
       var color = document.getElementById('t-color').value;
       if(!name || !code){ alert('Completa nombre y código'); return; }
+      btn.disabled = true;
+      btn.textContent = 'Agregando...';
       var newTeam = { id:uid(), name:name, code:code, color:color };
       state.teams.push(newTeam);
       await saveTeam(newTeam);
@@ -849,6 +944,8 @@ const db = getFirestore(fbApp);
       btn.addEventListener('click', async function(){
         var tid = btn.getAttribute('data-del-team');
         if(!confirm('¿Eliminar este equipo?')) return;
+        btn.disabled = true;
+        btn.textContent = 'Eliminando...';
         state.teams = state.teams.filter(function(t){return t.id!==tid;});
         await deleteTeamDoc(tid);
         renderGestionar(el);
@@ -858,6 +955,9 @@ const db = getFirestore(fbApp);
     var saveRealBtn = document.getElementById('save-real-standings');
     if(saveRealBtn){
       saveRealBtn.addEventListener('click', async function(){
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Guardando...';
         state.teams.forEach(function(t){
           var row = state.realStandings[t.id] || {};
           ['pj','pg','pe','pp','gf','gc'].forEach(function(field){
@@ -874,9 +974,12 @@ const db = getFirestore(fbApp);
     var lockBtn = document.getElementById('lock-preseason-btn');
     if(lockBtn){
       lockBtn.addEventListener('click', async function(){
+        var btn = this;
         var championTeamId = document.getElementById('ps-champion').value;
         var scorerName = document.getElementById('ps-scorer').value.trim();
         if(!championTeamId || !scorerName){ alert('Completa campeón y goleador reales'); return; }
+        btn.disabled = true;
+        btn.textContent = 'Guardando...';
         state.preseason.result = { championTeamId:championTeamId, scorerName:scorerName, locked:true };
         await savePreseason();
         renderGestionar(el);
@@ -885,6 +988,9 @@ const db = getFirestore(fbApp);
     var reopenBtn = document.getElementById('reopen-preseason');
     if(reopenBtn){
       reopenBtn.addEventListener('click', async function(){
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Reabriendo...';
         state.preseason.result = null;
         await savePreseason();
         renderGestionar(el);
@@ -909,6 +1015,7 @@ const db = getFirestore(fbApp);
   async function boot(){
     try{
       await loadAll();
+      hideBootLoading();
       if(state.myId && profileById(state.myId)){
         showMain();
       } else {
