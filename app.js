@@ -612,10 +612,9 @@ const db = getFirestore(fbApp);
     state.teams.forEach(function(t){
       html += '<div class="team-list-item" style="flex-wrap:wrap;">';
       html += '<div style="width:100%;display:flex;align-items:center;gap:8px;">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+t.name+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
-      html += '<div style="width:100%;margin-top:6px;"><input type="text" style="width:100%;" placeholder="URL del escudo (https://...)" data-logo-url="'+t.id+'" value="'+(t.logoUrl||'').replace(/"/g,'&quot;')+'"></div>';
+      html += '<div style="width:100%;margin-top:6px;"><label class="btn" style="display:inline-block;cursor:pointer;">Subir escudo<input type="file" accept="image/*" data-logo-file="'+t.id+'" style="display:none;"></label></div>';
       html += '</div>';
     });
-    html += '<button class="btn btn-gold" id="save-logos-btn" style="margin-top:12px;">Guardar escudos</button>';
     html += '<div class="form-grid" style="margin-top:12px;">';
     html += '<div class="form-row"><label>Nombre</label><input type="text" id="t-name" placeholder="Nombre del equipo"></div>';
     html += '<div class="form-row"><label>Código (3-4 letras)</label><input type="text" id="t-code" maxlength="4" placeholder="EQU"></div>';
@@ -761,20 +760,22 @@ const db = getFirestore(fbApp);
       });
     });
 
-    var saveLogosBtn = document.getElementById('save-logos-btn');
-    if(saveLogosBtn){
-      saveLogosBtn.addEventListener('click', async function(){
-        state.teams.forEach(function(t){
-          var input = el.querySelector('[data-logo-url="'+t.id+'"]');
-          if(input){
-            var val = input.value.trim();
-            t.logoUrl = val || null;
-          }
-        });
-        await saveTeams();
-        renderGestionar(el);
+    el.querySelectorAll('[data-logo-file]').forEach(function(input){
+      input.addEventListener('change', function(e){
+        var tid = input.getAttribute('data-logo-file');
+        var f = e.target.files[0];
+        if(!f) return;
+        var reader = new FileReader();
+        reader.onload = async function(ev){
+          var t = teamById(tid);
+          if(!t) return;
+          t.logoUrl = ev.target.result;
+          await saveTeams();
+          renderGestionar(el);
+        };
+        reader.readAsDataURL(f);
       });
-    }
+    });
 
     document.getElementById('add-team-btn').addEventListener('click', async function(){
       var name = document.getElementById('t-name').value.trim();
