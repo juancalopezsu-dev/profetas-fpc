@@ -48,6 +48,29 @@ const db = getFirestore(fbApp);
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
   function randomPin(){ return String(Math.floor(1000 + Math.random()*9000)); }
 
+  /* ---------- MANEJO DE ERRORES ---------- */
+  // Muestra el error en pantalla en vez de dejar la app en blanco/verde en silencio.
+  // Así se puede ver en el celular mismo qué está fallando, sin necesidad de conectar
+  // un depurador remoto.
+  function showFatalError(err){
+    console.error('Error fatal:', err);
+    var detail = (err && err.stack) ? err.stack : (err && err.message) ? err.message : String(err);
+    var box = document.getElementById('fatal-error-box');
+    if(!box){
+      box = document.createElement('div');
+      box.id = 'fatal-error-box';
+      box.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:#1a0000;color:#ffb4b4;padding:18px;font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-word;overflow:auto;z-index:99999;';
+      document.body.appendChild(box);
+    }
+    box.textContent = 'La app no pudo cargar por este error:\n\n' + detail;
+  }
+  window.addEventListener('error', function(event){
+    showFatalError(event.error || event.message);
+  });
+  window.addEventListener('unhandledrejection', function(event){
+    showFatalError(event.reason);
+  });
+
   /* ---------- FIRESTORE HELPERS ---------- */
   async function loadDoc(name, fallback){
     try{
@@ -884,13 +907,17 @@ const db = getFirestore(fbApp);
   }
 
   async function boot(){
-    await loadAll();
-    if(state.myId && profileById(state.myId)){
-      showMain();
-    } else {
-      renderLogin();
+    try{
+      await loadAll();
+      if(state.myId && profileById(state.myId)){
+        showMain();
+      } else {
+        renderLogin();
+      }
+    }catch(err){
+      showFatalError(err);
     }
   }
 
-  boot();
+  boot().catch(showFatalError);
 })();
