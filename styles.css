@@ -207,3 +207,16 @@
   }
   .boot-loading-text{color:var(--muted); font-size:13px;}
   .spinner-lg{width:32px; height:32px; border-width:3px;}
+
+  /* Modal de detalle de predicciones por persona */
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200;
+    display:flex; align-items:flex-end; justify-content:center;
+  }
+  .modal-box{
+    background:var(--panel); border-radius:16px 16px 0 0; padding:18px 16px 24px;
+    width:100%; max-width:520px; max-height:80vh; overflow-y:auto;
+    border:1px solid var(--line); border-bottom:none;
+  }
+  .modal-header{display:flex; align-items:center; gap:10px;}
+  .modal-title{flex:1; font-family:'Oswald',sans-serif; font-size:16px; text-transform:uppercase; letter-spacing:0.03em;}

@@ -153,6 +153,39 @@ const db = getFirestore(fbApp);
     }catch(e){ console.error('migrate teams error', e); }
   }
 
+  // Mismo patrón para los perfiles: 'profetas/profiles/profiles/{profileId}',
+  // un documento por persona en vez de un array compartido, para que varias
+  // fotos de perfil en base64 no topen el límite de 1MB de un solo documento.
+  function profilesCol(){ return collection(db, 'profetas', 'profiles', 'profiles'); }
+
+  async function loadProfiles(){
+    try{
+      var snap = await getDocs(profilesCol());
+      var list = [];
+      snap.forEach(function(docSnap){ list.push(docSnap.data()); });
+      list.sort(function(a,b){ return a.name.localeCompare(b.name); });
+      return list;
+    }catch(e){ console.error('load profiles error', e); return []; }
+  }
+  async function saveProfile(profile){
+    try{ await setDoc(doc(db, 'profetas', 'profiles', 'profiles', profile.id), profile); }
+    catch(e){ console.error('save profile error', profile.id, e); alert('No se pudo guardar el perfil. Revisa tu conexión.'); }
+  }
+  async function deleteProfileDoc(profileId){
+    try{ await deleteDoc(doc(db, 'profetas', 'profiles', 'profiles', profileId)); }
+    catch(e){ console.error('delete profile error', profileId, e); alert('No se pudo eliminar el perfil. Revisa tu conexión.'); }
+  }
+  async function migrateProfilesToSubcollection(profiles){
+    try{
+      var batch = writeBatch(db);
+      // Importante: se conserva el mismo p.id de cada perfil (no se generan IDs
+      // nuevos), porque las predicciones en 'matches' están ligadas a esos IDs.
+      profiles.forEach(function(p){ batch.set(doc(db, 'profetas', 'profiles', 'profiles', p.id), p); });
+      await batch.commit();
+      await deleteDoc(doc(db, 'profetas', 'profiles'));
+    }catch(e){ console.error('migrate profiles error', e); }
+  }
+
   function localGet(key){ try{ return localStorage.getItem(key); }catch(e){ return null; } }
   function localSet(key, val){ try{ localStorage.setItem(key, val); }catch(e){} }
 
@@ -161,15 +194,22 @@ const db = getFirestore(fbApp);
     // con Promise.all en vez de una por una — esto es lo que más pesa en la
     // carga inicial, sobre todo en redes móviles con más latencia.
     var results = await Promise.all([
-      loadDoc('profiles', {list:[]}),
+      loadProfiles(),
       loadTeams(),
       loadDoc('matches', {matches:[], predictions:{}}),
       loadDoc('preseason', { picks:{}, result:null }),
       loadDoc('realStandings', { data:{} }),
       loadDoc('admin', { password:null })
     ]);
-    var profilesDoc = results[0];
-    state.profiles = profilesDoc.list || [];
+    state.profiles = results[0];
+    if(!state.profiles.length){
+      var legacyProfilesDoc = await loadDoc('profiles', null);
+      if(legacyProfilesDoc && legacyProfilesDoc.list && legacyProfilesDoc.list.length){
+        // Se conservan los IDs originales: las predicciones en 'matches' están ligadas a ellos.
+        state.profiles = legacyProfilesDoc.list;
+        await migrateProfilesToSubcollection(state.profiles);
+      }
+    }
 
     state.teams = results[1];
     if(!state.teams.length){
@@ -196,8 +236,6 @@ const db = getFirestore(fbApp);
 
     state.myId = localGet('profetas-my-id');
   }
-
-  async function saveProfiles(){ await saveDoc('profiles', { list: state.profiles }); }
   async function saveMatchesAndPredictions(){ await saveDoc('matches', { matches: state.matches, predictions: state.predictions }); }
   async function savePreseason(){ await saveDoc('preseason', state.preseason); }
   async function saveRealStandings(){ await saveDoc('realStandings', { data: state.realStandings }); }
@@ -331,7 +369,7 @@ const db = getFirestore(fbApp);
       btn.textContent = 'Creando...';
       var newP = { id: uid(), name: name, photo: pendingPhoto, pin: pin };
       state.profiles.push(newP);
-      await saveProfiles();
+      await saveProfile(newP);
       state.myId = newP.id;
       saveMyId();
       showMain();
@@ -343,6 +381,7 @@ const db = getFirestore(fbApp);
     {id:'predicciones', label:'Predicciones'},
     {id:'tabla', label:'Tabla'},
     {id:'pretemporada', label:'Pre-temporada'},
+    {id:'perfil', label:'Mi perfil'},
     {id:'gestionar', label:'Gestionar'}
   ];
 
@@ -367,6 +406,7 @@ const db = getFirestore(fbApp);
     if(state.tab==='predicciones') return renderPredicciones(el);
     if(state.tab==='tabla') return renderTabla(el);
     if(state.tab==='pretemporada') return renderPretemporada(el);
+    if(state.tab==='perfil') return renderPerfil(el);
     if(state.tab==='gestionar'){
       if(!state.adminUnlocked) return renderGestionarGate(el);
       return renderGestionar(el);
@@ -481,7 +521,7 @@ const db = getFirestore(fbApp);
       } else {
         rows.forEach(function(r, i){
           var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
-          html += '<div class="board-row'+(i===0?' top1':'')+'">';
+          html += '<div class="board-row'+(i===0?' top1':'')+'" data-profile-detail="'+r.profile.id+'" style="cursor:pointer;">';
           html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
           html += avatarHtml(r.profile, 38);
           html += '<div class="board-name">'+r.profile.name+'</div>';
@@ -523,6 +563,85 @@ const db = getFirestore(fbApp);
         renderTabla(el);
       });
     });
+    el.querySelectorAll('[data-profile-detail]').forEach(function(row){
+      row.addEventListener('click', function(){
+        showProfileDetailModal(row.getAttribute('data-profile-detail'));
+      });
+    });
+  }
+
+  function showProfileDetailModal(profileId){
+    closeProfileDetailModal();
+    var profile = profileById(profileId);
+    if(!profile) return;
+
+    var predictedMatches = state.matches.filter(function(m){
+      return (state.predictions[m.id] || {})[profileId] !== undefined;
+    }).sort(function(a,b){ return new Date(b.kickoff||0) - new Date(a.kickoff||0); });
+
+    var html = '<div class="modal-overlay" id="profile-detail-modal">';
+    html += '<div class="modal-box">';
+    html += '<div class="modal-header">'+avatarHtml(profile,40)+'<div class="modal-title">'+profile.name+'</div><button class="btn" id="close-profile-detail">Cerrar</button></div>';
+
+    html += '<div class="section-title" style="margin-top:14px;">Predicciones de partidos</div>';
+    if(!predictedMatches.length){
+      html += '<div class="empty">Todavía no ha predicho ningún partido.</div>';
+    } else {
+      predictedMatches.forEach(function(m){
+        var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
+        var pred = state.predictions[m.id][profileId];
+        var hasResult = !(m.homeScore===null || m.homeScore===undefined);
+        var pts = hasResult ? pointsForPrediction(m, pred) : null;
+        html += '<div class="team-list-item" style="flex-wrap:wrap;">';
+        html += '<div style="width:100%;font-size:13px;">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'</div>';
+        html += '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-top:4px;">';
+        html += '<span>Predijo: <b style="color:var(--white);">'+pred.home+'-'+pred.away+'</b></span>';
+        if(hasResult){
+          html += '<span>Real: <b style="color:var(--white);">'+m.homeScore+'-'+m.awayScore+'</b></span>';
+          html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+pts+' pts</span>';
+        } else {
+          html += '<span>Sin resultado todavía</span>';
+        }
+        html += '</div></div>';
+      });
+    }
+
+    var pick = state.preseason.picks[profileId];
+    if(pick){
+      html += '<div class="section-title" style="margin-top:16px;">Pronóstico de pre-temporada</div>';
+      var champT = teamById(pick.championTeamId);
+      var res = state.preseason.result;
+      html += '<div class="card" style="margin-bottom:0;">';
+      html += '<div style="font-size:13px;">Campeón: <b>'+(champT?champT.name:'-')+'</b>';
+      if(res && res.locked){
+        var champOk = res.championTeamId && pick.championTeamId===res.championTeamId;
+        html += champOk ? ' <span class="points-pill">✔ +12 pts</span>' : ' <span class="points-pill zero">✘</span>';
+      }
+      html += '</div>';
+      html += '<div style="font-size:13px;margin-top:6px;">Goleador: <b>'+(pick.scorerName||'-')+'</b>';
+      if(res && res.locked){
+        var scorerOk = res.scorerName && pick.scorerName && pick.scorerName.trim().toLowerCase()===res.scorerName.trim().toLowerCase();
+        html += scorerOk ? ' <span class="points-pill">✔ +12 pts</span>' : ' <span class="points-pill zero">✘</span>';
+      }
+      html += '</div>';
+      html += '</div>';
+    }
+
+    html += '</div></div>';
+
+    var wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    document.body.appendChild(wrapper.firstChild);
+
+    document.getElementById('close-profile-detail').addEventListener('click', closeProfileDetailModal);
+    document.getElementById('profile-detail-modal').addEventListener('click', function(e){
+      if(e.target.id === 'profile-detail-modal') closeProfileDetailModal();
+    });
+  }
+
+  function closeProfileDetailModal(){
+    var m = document.getElementById('profile-detail-modal');
+    if(m) m.remove();
   }
 
   /* ---------- PRETEMPORADA ---------- */
@@ -583,6 +702,77 @@ const db = getFirestore(fbApp);
         renderPretemporada(el);
       });
     }
+  }
+
+  /* ---------- MI PERFIL ---------- */
+  function renderPerfil(el){
+    var me = profileById(state.myId);
+    if(!me){ el.innerHTML = '<div class="empty">No se encontró tu perfil.</div>'; return; }
+
+    var pendingPhoto = me.photo || null;
+
+    var html = '<div class="card" style="max-width:360px;margin:0 auto;">';
+    html += '<div class="section-title">Mi perfil</div>';
+    html += '<div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">';
+    html += '<div id="perfil-photo-preview"></div>';
+    html += '<label class="btn" style="cursor:pointer;"><span id="perfil-photo-btn-label">Cambiar foto</span><input type="file" accept="image/*" id="perfil-photo-file" style="display:none;"></label>';
+    html += '</div>';
+    html += '<div class="form-row"><label>Nombre</label><input type="text" id="perfil-name" value="'+me.name.replace(/"/g,'&quot;')+'"></div>';
+    html += '<div class="form-row"><label>PIN actual (para confirmar los cambios)</label><input type="text" id="perfil-current-pin" class="pin-input" maxlength="4" inputmode="numeric" placeholder="PIN actual"></div>';
+    html += '<div class="form-row"><label>Nuevo PIN (déjalo vacío si no lo quieres cambiar)</label><input type="text" id="perfil-new-pin" class="pin-input" maxlength="4" inputmode="numeric" placeholder="Nuevo PIN de 4 dígitos"></div>';
+    html += '<button class="btn btn-gold" id="save-perfil-btn" style="width:100%;margin-top:8px;">Guardar cambios</button>';
+    html += '<div id="perfil-msg" style="font-size:12px;margin-top:8px;"></div>';
+    html += '</div>';
+    el.innerHTML = html;
+
+    function renderPhotoPreview(){
+      var previewEl = document.getElementById('perfil-photo-preview');
+      if(pendingPhoto){
+        previewEl.innerHTML = '<img class="avatar" src="'+pendingPhoto+'" style="width:64px;height:64px;">';
+      } else {
+        previewEl.innerHTML = '<div class="avatar-fallback" style="width:64px;height:64px;">'+me.name.slice(0,2).toUpperCase()+'</div>';
+      }
+    }
+    renderPhotoPreview();
+
+    document.getElementById('perfil-photo-file').addEventListener('change', function(e){
+      var f = e.target.files[0];
+      if(!f) return;
+      var labelSpan = document.getElementById('perfil-photo-btn-label');
+      if(labelSpan) labelSpan.textContent = 'Procesando...';
+      resizeImageToDataUrl(f, 150).then(function(dataUrl){
+        pendingPhoto = dataUrl;
+        renderPhotoPreview();
+        if(labelSpan) labelSpan.textContent = 'Cambiar foto';
+      }).catch(function(){
+        alert('No se pudo procesar la imagen.');
+        if(labelSpan) labelSpan.textContent = 'Cambiar foto';
+      });
+    });
+
+    document.getElementById('save-perfil-btn').addEventListener('click', async function(){
+      var btn = this;
+      var msgEl = document.getElementById('perfil-msg');
+      msgEl.textContent = '';
+      var name = document.getElementById('perfil-name').value.trim();
+      var currentPin = document.getElementById('perfil-current-pin').value.trim();
+      var newPin = document.getElementById('perfil-new-pin').value.trim();
+      if(!name){ alert('Escribe tu nombre'); return; }
+      if(currentPin !== me.pin){
+        msgEl.style.color = 'var(--danger)';
+        msgEl.textContent = 'El PIN actual no es correcto.';
+        return;
+      }
+      if(newPin && !/^\d{4}$/.test(newPin)){ alert('El nuevo PIN debe ser de 4 dígitos'); return; }
+      btn.disabled = true;
+      btn.textContent = 'Guardando...';
+      me.name = name;
+      me.photo = pendingPhoto;
+      if(newPin) me.pin = newPin;
+      await saveProfile(me);
+      renderShell();
+      renderPerfil(el);
+    });
   }
 
   /* ---------- PUERTA DE CONTRASEÑA ---------- */
@@ -898,7 +1088,7 @@ const db = getFirestore(fbApp);
           if(state.predictions[mid] && (pid in state.predictions[mid])) delete state.predictions[mid][pid];
         });
         if(state.preseason.picks[pid]) delete state.preseason.picks[pid];
-        await Promise.all([saveProfiles(), saveMatchesAndPredictions(), savePreseason()]);
+        await Promise.all([deleteProfileDoc(pid), saveMatchesAndPredictions(), savePreseason()]);
         if(state.myId === pid){ state.myId = null; saveMyId(); }
         renderGestionar(el);
       });
