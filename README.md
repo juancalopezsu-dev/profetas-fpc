@@ -9,6 +9,9 @@ App familiar de predicciones de la Liga BetPlay FPC.
 - `app.js` — toda la lógica de la app (Firestore, predicciones, admin, etc.)
 - `firebase-config.js` — credenciales del proyecto de Firebase (públicas, no son secretas)
 - `api/resultados.js` — función serverless de Vercel que consulta API-Football de forma segura
+- `api/equipos.js` — función serverless que trae los escudos oficiales de los equipos desde API-Football
+- `api/actualizar-resultados.js` — función serverless (Vercel Cron) que actualiza resultados automáticamente usando el Admin SDK de Firebase
+- `vercel.json` — configura el Cron Job que corre `api/actualizar-resultados` 2 veces al día
 
 ## Pasos para publicar (una sola vez)
 
@@ -21,8 +24,9 @@ App familiar de predicciones de la Liga BetPlay FPC.
 2. Importa el repo de GitHub que acabas de crear.
 3. Framework: déjalo en **"Other"** (no es Next.js ni nada especial, es HTML plano).
 4. Antes de darle Deploy, ve a **Environment Variables** y agrega:
-   - **Name:** `API_FOOTBALL_KEY`
-   - **Value:** tu key de api-football.com (la que ya tienes)
+   - **Name:** `API_FOOTBALL_KEY` — **Value:** tu key de api-football.com (la que ya tienes)
+   - **Name:** `FIREBASE_SERVICE_ACCOUNT` — **Value:** el JSON completo del service account de Firebase (Firebase Console → Configuración del proyecto → Cuentas de servicio → Generar nueva clave privada), pegado como texto en una sola línea
+   - **Name:** `CRON_SECRET` (opcional pero recomendado) — **Value:** cualquier texto aleatorio largo; Vercel lo usa automáticamente para que solo el Cron Job pueda ejecutar `api/actualizar-resultados`
 5. Dale **Deploy**. En un minuto te da un link tipo `profetas-del-fpc.vercel.app` — ese es el link que compartes con tu familia.
 
 ### 3. Reglas de seguridad de Firestore (importante, antes de 30 días)
@@ -60,5 +64,8 @@ Vercel va a detectar el push y redesplegar la app sola — no necesitas volver a
 
 - **PIN de perfiles**: cada quien crea un PIN de 4 dígitos al crear su perfil. Tú (admin) puedes verlos todos en Gestionar por si alguien lo olvida.
 - **Bloqueo de predicciones**: se cierra automáticamente en cuanto llega la hora de inicio (`kickoff`) que le pongas al partido.
-- **Resultados automáticos**: el botón "Buscar resultados automáticos" consulta la API-Football por la fecha de los partidos pendientes y llena los marcadores que encuentre — pero siempre tienes que darle "Guardar" tú, así puedes corregir si algo no coincide.
+- **Resultados automáticos (manual)**: el botón "Buscar resultados automáticos" consulta la API-Football por la fecha de los partidos pendientes y llena los marcadores que encuentre — pero siempre tienes que darle "Guardar" tú, así puedes corregir si algo no coincide.
+- **Resultados automáticos (sin abrir la app)**: el Cron Job de Vercel corre `api/actualizar-resultados` dos veces al día (8am y 11pm hora Colombia) y escribe directo en Firestore los resultados de los partidos que ya terminaron (status "FT" en API-Football), sin necesidad de que nadie entre a la app.
 - **Editar resultado ya cargado**: recalcula los puntos de todos automáticamente, útil si la Dimayor cambia un resultado por reglamento.
+- **Eliminar partido**: tanto en "Cargar resultados" como en "Editar resultados ya cargados" hay un botón "Eliminar" (con confirmación) que borra el partido y sus predicciones asociadas de Firestore.
+- **Escudos reales**: el botón "Actualizar escudos desde API-Football" en la sección Equipos trae los escudos oficiales y los guarda por equipo; si un equipo no tiene escudo guardado, se sigue mostrando el círculo de iniciales como respaldo.

@@ -106,6 +106,9 @@ const db = getFirestore(fbApp);
   function shieldHtml(team, size){
     size = size || 44;
     if(!team) return '<div class="shield" style="background:#444;width:'+size+'px;height:'+size+'px;">?</div>';
+    if(team.logoUrl){
+      return '<img class="shield" src="'+team.logoUrl+'" alt="'+team.name+'" style="width:'+size+'px;height:'+size+'px;">';
+    }
     return '<div class="shield" style="background:'+team.color+';width:'+size+'px;height:'+size+'px;font-size:'+(size*0.32)+'px;">'+team.code+'</div>';
   }
 
@@ -579,6 +582,7 @@ const db = getFirestore(fbApp);
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-res-away="'+m.id+'">';
         html += '<button class="btn btn-gold" data-save-result="'+m.id+'">Guardar</button>';
+        html += '<button class="btn btn-danger" data-del-match="'+m.id+'">Eliminar</button>';
         html += '</div>';
       });
     }
@@ -597,6 +601,7 @@ const db = getFirestore(fbApp);
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-edit-away="'+m.id+'" value="'+m.awayScore+'">';
         html += '<button class="btn" data-edit-result="'+m.id+'">Actualizar</button>';
+        html += '<button class="btn btn-danger" data-del-match="'+m.id+'">Eliminar</button>';
         html += '</div>';
       });
       html += '</div>';
@@ -604,6 +609,10 @@ const db = getFirestore(fbApp);
 
     html += '<div class="card">';
     html += '<div class="section-title">Equipos</div>';
+    html += '<div class="auto-fetch-row">';
+    html += '<button class="btn" id="fetch-shields-btn">Actualizar escudos desde API-Football</button>';
+    html += '<span id="fetch-shields-status" style="font-size:11px;color:var(--muted);"></span>';
+    html += '</div>';
     state.teams.forEach(function(t){
       html += '<div class="team-list-item">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+t.name+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
     });
@@ -739,6 +748,42 @@ const db = getFirestore(fbApp);
         await saveMatchesAndPredictions();
         renderGestionar(el);
       });
+    });
+
+    el.querySelectorAll('[data-del-match]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var mid = btn.getAttribute('data-del-match');
+        if(!confirm('¿Eliminar este partido? También se borrarán las predicciones asociadas a él.')) return;
+        state.matches = state.matches.filter(function(m){return m.id!==mid;});
+        delete state.predictions[mid];
+        await saveMatchesAndPredictions();
+        renderGestionar(el);
+      });
+    });
+
+    document.getElementById('fetch-shields-btn').addEventListener('click', async function(){
+      var statusEl = document.getElementById('fetch-shields-status');
+      statusEl.innerHTML = '<span class="spinner"></span> Buscando escudos...';
+      try{
+        var resp = await fetch('/api/equipos');
+        var data = await resp.json();
+        if(data.error){ statusEl.textContent = data.error; return; }
+        var apiTeams = data.teams || [];
+        var updated = 0;
+        state.teams.forEach(function(t){
+          var tName = t.name.toLowerCase();
+          var match = apiTeams.find(function(at){
+            var aName = (at.name||'').toLowerCase();
+            return aName===tName || aName.indexOf(tName.split(' ')[0])>=0 || tName.indexOf(aName.split(' ')[0])>=0;
+          });
+          if(match && match.logo){ t.logoUrl = match.logo; updated++; }
+        });
+        await saveTeams();
+        statusEl.textContent = 'Se actualizaron '+updated+' escudo(s).';
+        renderGestionar(el);
+      }catch(e){
+        statusEl.textContent = 'Error consultando la API.';
+      }
     });
 
     document.getElementById('add-team-btn').addEventListener('click', async function(){

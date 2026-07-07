@@ -2,5 +2,8 @@
   "name": "profetas-del-fpc",
   "version": "1.0.0",
   "private": true,
-  "description": "App de predicciones familiares de la Liga BetPlay FPC"
+  "description": "App de predicciones familiares de la Liga BetPlay FPC",
+  "dependencies": {
+    "firebase-admin": "^12.6.0"
+  }
 }

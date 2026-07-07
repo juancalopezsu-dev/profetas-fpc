@@ -113,6 +113,9 @@
     font-family:'Oswald',sans-serif; font-weight:700; font-size:14px;
     color:var(--bg);
   }
+  img.shield{
+    background:#F5F1E6; object-fit:contain; padding:4px;
+  }
   .team-name{font-size:11px; text-align:center; line-height:1.2; color:var(--white);}
   .score-inputs{display:flex; align-items:center; gap:8px;}
   .vs-label{font-size:11px; color:var(--muted); font-family:'Oswald',sans-serif;}
