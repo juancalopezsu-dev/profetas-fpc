@@ -9,7 +9,6 @@ App familiar de predicciones de la Liga BetPlay FPC.
 - `app.js` — toda la lógica de la app (Firestore, predicciones, admin, etc.)
 - `firebase-config.js` — credenciales del proyecto de Firebase (públicas, no son secretas)
 - `api/resultados.js` — función serverless de Vercel que consulta API-Football de forma segura
-- `api/equipos.js` — función serverless que trae los escudos oficiales de los equipos desde API-Football
 - `api/actualizar-resultados.js` — función serverless (Vercel Cron) que actualiza resultados automáticamente usando el Admin SDK de Firebase
 - `vercel.json` — configura el Cron Job que corre `api/actualizar-resultados` 2 veces al día
 
@@ -68,4 +67,4 @@ Vercel va a detectar el push y redesplegar la app sola — no necesitas volver a
 - **Resultados automáticos (sin abrir la app)**: el Cron Job de Vercel corre `api/actualizar-resultados` dos veces al día (8am y 11pm hora Colombia) y escribe directo en Firestore los resultados de los partidos que ya terminaron (status "FT" en API-Football), sin necesidad de que nadie entre a la app.
 - **Editar resultado ya cargado**: recalcula los puntos de todos automáticamente, útil si la Dimayor cambia un resultado por reglamento.
 - **Eliminar partido**: tanto en "Cargar resultados" como en "Editar resultados ya cargados" hay un botón "Eliminar" (con confirmación) que borra el partido y sus predicciones asociadas de Firestore.
-- **Escudos reales**: el botón "Actualizar escudos desde API-Football" en la sección Equipos trae los escudos oficiales y los guarda por equipo; si un equipo no tiene escudo guardado, se sigue mostrando el círculo de iniciales como respaldo.
+- **Escudos reales**: en la sección Equipos hay un campo "URL del escudo" por equipo donde puedes pegar manualmente el link de una imagen y darle "Guardar escudos"; si un equipo no tiene URL guardada, se sigue mostrando el círculo de iniciales como respaldo.

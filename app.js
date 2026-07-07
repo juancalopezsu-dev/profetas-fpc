@@ -609,13 +609,13 @@ const db = getFirestore(fbApp);
 
     html += '<div class="card">';
     html += '<div class="section-title">Equipos</div>';
-    html += '<div class="auto-fetch-row">';
-    html += '<button class="btn" id="fetch-shields-btn">Actualizar escudos desde API-Football</button>';
-    html += '<span id="fetch-shields-status" style="font-size:11px;color:var(--muted);"></span>';
-    html += '</div>';
     state.teams.forEach(function(t){
-      html += '<div class="team-list-item">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+t.name+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
+      html += '<div class="team-list-item" style="flex-wrap:wrap;">';
+      html += '<div style="width:100%;display:flex;align-items:center;gap:8px;">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+t.name+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
+      html += '<div style="width:100%;margin-top:6px;"><input type="text" style="width:100%;" placeholder="URL del escudo (https://...)" data-logo-url="'+t.id+'" value="'+(t.logoUrl||'').replace(/"/g,'&quot;')+'"></div>';
+      html += '</div>';
     });
+    html += '<button class="btn btn-gold" id="save-logos-btn" style="margin-top:12px;">Guardar escudos</button>';
     html += '<div class="form-grid" style="margin-top:12px;">';
     html += '<div class="form-row"><label>Nombre</label><input type="text" id="t-name" placeholder="Nombre del equipo"></div>';
     html += '<div class="form-row"><label>Código (3-4 letras)</label><input type="text" id="t-code" maxlength="4" placeholder="EQU"></div>';
@@ -761,30 +761,20 @@ const db = getFirestore(fbApp);
       });
     });
 
-    document.getElementById('fetch-shields-btn').addEventListener('click', async function(){
-      var statusEl = document.getElementById('fetch-shields-status');
-      statusEl.innerHTML = '<span class="spinner"></span> Buscando escudos...';
-      try{
-        var resp = await fetch('/api/equipos');
-        var data = await resp.json();
-        if(data.error){ statusEl.textContent = data.error; return; }
-        var apiTeams = data.teams || [];
-        var updated = 0;
+    var saveLogosBtn = document.getElementById('save-logos-btn');
+    if(saveLogosBtn){
+      saveLogosBtn.addEventListener('click', async function(){
         state.teams.forEach(function(t){
-          var tName = t.name.toLowerCase();
-          var match = apiTeams.find(function(at){
-            var aName = (at.name||'').toLowerCase();
-            return aName===tName || aName.indexOf(tName.split(' ')[0])>=0 || tName.indexOf(aName.split(' ')[0])>=0;
-          });
-          if(match && match.logo){ t.logoUrl = match.logo; updated++; }
+          var input = el.querySelector('[data-logo-url="'+t.id+'"]');
+          if(input){
+            var val = input.value.trim();
+            t.logoUrl = val || null;
+          }
         });
         await saveTeams();
-        statusEl.textContent = 'Se actualizaron '+updated+' escudo(s).';
         renderGestionar(el);
-      }catch(e){
-        statusEl.textContent = 'Error consultando la API.';
-      }
-    });
+      });
+    }
 
     document.getElementById('add-team-btn').addEventListener('click', async function(){
       var name = document.getElementById('t-name').value.trim();
