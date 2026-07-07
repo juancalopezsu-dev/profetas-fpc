@@ -36,7 +36,7 @@ Antes de que eso pase, entra a Firebase Console → Firestore Database → pesta
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /profetas/{doc} {
+    match /profetas/{document=**} {
       allow read, write: if true;
     }
   }
@@ -44,6 +44,8 @@ service cloud.firestore {
 ```
 
 Esto mantiene el acceso abierto (como está ahora) permanentemente, sin depender del modo de prueba. Como es una app familiar sin datos sensibles reales (solo predicciones de fútbol), esto es aceptable — no hace falta un sistema de autenticación complejo.
+
+**Importante:** el `{document=**}` (en vez de `{doc}`) es necesario porque los equipos ahora viven en la subcolección `profetas/teams/teams/{teamId}` — con `{doc}` a secas, Firestore solo permite acceso a documentos directos bajo `profetas` y bloquea (permission-denied) cualquier lectura/escritura dentro de esa subcolección. Si ya tenías la regla vieja con `{doc}`, actualízala en Firebase Console antes de volver a abrir Gestionar.
 
 ## Cómo seguir editando esta app
 
@@ -61,6 +63,7 @@ Vercel va a detectar el push y redesplegar la app sola — no necesitas volver a
 
 ## Notas técnicas
 
+- **Equipos en Firestore**: cada equipo es su propio documento en la subcolección `profetas/teams/teams/{teamId}` (no un array dentro de un documento único), para no toparse con el límite de 1MB por documento cuando varios equipos tienen escudo en base64. Al abrir la app por primera vez con la nueva estructura, si esa subcolección está vacía, se migran automáticamente los equipos del documento viejo `profetas/teams` (o se crean los equipos por defecto si tampoco existía), y luego se borra el documento viejo.
 - **PIN de perfiles**: cada quien crea un PIN de 4 dígitos al crear su perfil. Tú (admin) puedes verlos todos en Gestionar por si alguien lo olvida.
 - **Bloqueo de predicciones**: se cierra automáticamente en cuanto llega la hora de inicio (`kickoff`) que le pongas al partido.
 - **Resultados automáticos (manual)**: el botón "Buscar resultados automáticos" consulta la API-Football por la fecha de los partidos pendientes y llena los marcadores que encuentre — pero siempre tienes que darle "Guardar" tú, así puedes corregir si algo no coincide.

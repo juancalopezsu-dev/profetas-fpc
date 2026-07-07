@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getFirestore, doc, getDoc, setDoc
+  getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -61,6 +61,38 @@ const db = getFirestore(fbApp);
     catch(e){ console.error('save error', name, e); alert('No se pudo guardar. Revisa tu conexión.'); }
   }
 
+  // Los equipos viven en la subcolección 'profetas/teams/teams/{teamId}' —
+  // un documento por equipo, en vez de un array dentro de un único documento,
+  // para no toparnos con el límite de 1MB por documento cuando hay escudos en base64.
+  function teamsCol(){ return collection(db, 'profetas', 'teams', 'teams'); }
+
+  async function loadTeams(){
+    try{
+      var snap = await getDocs(teamsCol());
+      var list = [];
+      snap.forEach(function(docSnap){ list.push(docSnap.data()); });
+      list.sort(function(a,b){ return a.name.localeCompare(b.name); });
+      return list;
+    }catch(e){ console.error('load teams error', e); return []; }
+  }
+  async function saveTeam(team){
+    try{ await setDoc(doc(db, 'profetas', 'teams', 'teams', team.id), team); }
+    catch(e){ console.error('save team error', team.id, e); alert('No se pudo guardar el equipo. Revisa tu conexión.'); }
+  }
+  async function deleteTeamDoc(teamId){
+    try{ await deleteDoc(doc(db, 'profetas', 'teams', 'teams', teamId)); }
+    catch(e){ console.error('delete team error', teamId, e); alert('No se pudo eliminar el equipo. Revisa tu conexión.'); }
+  }
+  async function migrateTeamsToSubcollection(teams){
+    try{
+      var batch = writeBatch(db);
+      teams.forEach(function(t){ batch.set(doc(db, 'profetas', 'teams', 'teams', t.id), t); });
+      await batch.commit();
+      // El documento viejo (array único) ya no se usa; lo borramos para liberar el espacio que ocupaba.
+      await deleteDoc(doc(db, 'profetas', 'teams'));
+    }catch(e){ console.error('migrate teams error', e); }
+  }
+
   function localGet(key){ try{ return localStorage.getItem(key); }catch(e){ return null; } }
   function localSet(key, val){ try{ localStorage.setItem(key, val); }catch(e){} }
 
@@ -68,12 +100,15 @@ const db = getFirestore(fbApp);
     var profilesDoc = await loadDoc('profiles', {list:[]});
     state.profiles = profilesDoc.list || [];
 
-    var teamsDoc = await loadDoc('teams', null);
-    if(teamsDoc && teamsDoc.list && teamsDoc.list.length){
-      state.teams = teamsDoc.list;
-    } else {
-      state.teams = DEFAULT_TEAMS.map(function(t){ return {id:uid(), name:t[0], code:t[1], color:t[2]}; });
-      await saveDoc('teams', { list: state.teams });
+    state.teams = await loadTeams();
+    if(!state.teams.length){
+      var legacyTeamsDoc = await loadDoc('teams', null);
+      if(legacyTeamsDoc && legacyTeamsDoc.list && legacyTeamsDoc.list.length){
+        state.teams = legacyTeamsDoc.list;
+      } else {
+        state.teams = DEFAULT_TEAMS.map(function(t){ return {id:uid(), name:t[0], code:t[1], color:t[2]}; });
+      }
+      await migrateTeamsToSubcollection(state.teams);
     }
 
     var matchesDoc = await loadDoc('matches', {matches:[], predictions:{}});
@@ -92,7 +127,6 @@ const db = getFirestore(fbApp);
     state.myId = localGet('profetas-my-id');
   }
 
-  async function saveTeams(){ await saveDoc('teams', { list: state.teams }); }
   async function saveProfiles(){ await saveDoc('profiles', { list: state.profiles }); }
   async function saveMatchesAndPredictions(){ await saveDoc('matches', { matches: state.matches, predictions: state.predictions }); }
   async function savePreseason(){ await saveDoc('preseason', state.preseason); }
@@ -770,7 +804,7 @@ const db = getFirestore(fbApp);
           var t = teamById(tid);
           if(!t) return;
           t.logoUrl = ev.target.result;
-          await saveTeams();
+          await saveTeam(t);
           renderGestionar(el);
         };
         reader.readAsDataURL(f);
@@ -782,8 +816,9 @@ const db = getFirestore(fbApp);
       var code = document.getElementById('t-code').value.trim().toUpperCase();
       var color = document.getElementById('t-color').value;
       if(!name || !code){ alert('Completa nombre y código'); return; }
-      state.teams.push({ id:uid(), name:name, code:code, color:color });
-      await saveTeams();
+      var newTeam = { id:uid(), name:name, code:code, color:color };
+      state.teams.push(newTeam);
+      await saveTeam(newTeam);
       renderGestionar(el);
     });
 
@@ -792,7 +827,7 @@ const db = getFirestore(fbApp);
         var tid = btn.getAttribute('data-del-team');
         if(!confirm('¿Eliminar este equipo?')) return;
         state.teams = state.teams.filter(function(t){return t.id!==tid;});
-        await saveTeams();
+        await deleteTeamDoc(tid);
         renderGestionar(el);
       });
     });
