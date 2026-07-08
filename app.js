@@ -210,6 +210,7 @@ const db = getFirestore(fbApp);
         await migrateProfilesToSubcollection(state.profiles);
       }
     }
+    await ensureBotProfile();
 
     state.teams = results[1];
     if(!state.teams.length){
@@ -244,6 +245,38 @@ const db = getFirestore(fbApp);
 
   function teamById(id){ return state.teams.find(function(t){return t.id===id;}); }
   function profileById(id){ return state.profiles.find(function(p){return p.id===id;}); }
+
+  /* ---------- PERFIL BOT (predicción automática de respaldo) ---------- */
+  var BOT_NAME = 'Carlos Antonio Vélez';
+  function getBotProfile(){ return state.profiles.find(function(p){ return p.isBot; }); }
+  function getBotProfileId(){ var b = getBotProfile(); return b ? b.id : null; }
+
+  async function ensureBotProfile(){
+    var bot = getBotProfile();
+    if(bot) return bot;
+    bot = { id: uid(), name: BOT_NAME, photo: null, pin: null, isBot: true };
+    state.profiles.push(bot);
+    await saveProfile(bot);
+    return bot;
+  }
+
+  // Marcadores bajos y comunes (~80% de las veces) vs. resultados más
+  // goleadores y menos comunes (~20%, hasta un máximo razonable de 5 goles
+  // por equipo, evitando repetir uno de los marcadores comunes de la lista).
+  var BOT_COMMON_SCORES = [[0,0],[1,0],[0,1],[1,1],[2,0],[0,2],[2,1],[1,2],[2,2]];
+  function randomBotScore(){
+    if(Math.random() < 0.8){
+      var pick = BOT_COMMON_SCORES[Math.floor(Math.random()*BOT_COMMON_SCORES.length)];
+      return { home: pick[0], away: pick[1] };
+    }
+    var home, away, tries = 0;
+    do{
+      home = Math.floor(Math.random()*6);
+      away = Math.floor(Math.random()*6);
+      tries++;
+    } while(BOT_COMMON_SCORES.some(function(s){ return s[0]===home && s[1]===away; }) && tries < 20);
+    return { home: home, away: away };
+  }
 
   function shieldHtml(team, size){
     size = size || 44;
@@ -282,15 +315,32 @@ const db = getFirestore(fbApp);
     return 0;
   }
 
+  // Predicción "efectiva" de una persona para un partido: la suya si la puso,
+  // o si el partido ya cerró (llegó la hora de kickoff) y no predijo, la del
+  // perfil bot "Carlos Antonio Vélez" copiada automáticamente. No se escribe
+  // en Firestore — se calcula al vuelo para que siempre refleje el estado
+  // real de los partidos sin depender de un disparador exacto a la hora de cierre.
+  function effectivePrediction(match, profileId){
+    var direct = (state.predictions[match.id] || {})[profileId];
+    if(direct) return { pred: direct, auto: false };
+    var botId = getBotProfileId();
+    if(!botId || profileId === botId) return null;
+    if(!isLocked(match)) return null;
+    var botPred = (state.predictions[match.id] || {})[botId];
+    if(!botPred) return null;
+    return { pred: botPred, auto: true };
+  }
+
   function computeStandings(){
     var totals = {};
     state.profiles.forEach(function(p){ totals[p.id] = 0; });
     state.matches.forEach(function(m){
       if(m.homeScore===null||m.homeScore===undefined) return;
-      var predsForMatch = state.predictions[m.id] || {};
-      Object.keys(predsForMatch).forEach(function(pid){
-        if(!(pid in totals)) totals[pid]=0;
-        totals[pid] += pointsForPrediction(m, predsForMatch[pid]);
+      state.profiles.forEach(function(p){
+        var eff = effectivePrediction(m, p.id);
+        if(!eff) return;
+        if(!(p.id in totals)) totals[p.id]=0;
+        totals[p.id] += pointsForPrediction(m, eff.pred);
       });
     });
     if(state.preseason.result){
@@ -313,9 +363,10 @@ const db = getFirestore(fbApp);
     var html = '<div class="brand-mark" style="width:56px;height:56px;font-size:20px;margin:0 auto 16px;">FPC</div>';
     html += '<div class="login-title display">Los Profetas del FPC</div>';
     html += '<div class="login-sub">Elige tu perfil o crea uno nuevo para empezar a jugar</div>';
-    if(state.profiles.length){
+    var humanProfiles = state.profiles.filter(function(p){ return !p.isBot; });
+    if(humanProfiles.length){
       html += '<div class="profile-grid">';
-      state.profiles.forEach(function(p){
+      humanProfiles.forEach(function(p){
         html += '<div class="profile-tile" data-select-profile="'+p.id+'">'+avatarHtml(p,56)+'<div class="profile-tile-name">'+p.name+'</div></div>';
       });
       html += '</div>';
@@ -488,16 +539,20 @@ const db = getFirestore(fbApp);
     if(editable){
       html += '<div class="match-actions"><button class="btn btn-gold" data-save-pred="'+m.id+'">Guardar predicción</button></div>';
     } else if(waitingResult){
-      var predW = (state.predictions[m.id]||{})[state.myId];
+      var effW = effectivePrediction(m, state.myId);
       html += '<div class="match-actions"><span class="locked-tag">Predicción cerrada</span>';
-      if(predW){ html += '<span class="points-pill" style="margin-left:8px;">Tu predicción: '+predW.home+'-'+predW.away+'</span>'; }
+      if(effW){
+        var labelW = effW.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+effW.pred.home+'-'+effW.pred.away) : ('Tu predicción: '+effW.pred.home+'-'+effW.pred.away);
+        html += '<span class="points-pill" style="margin-left:8px;">'+labelW+'</span>';
+      }
       html += '</div>';
     } else {
-      var pred = (state.predictions[m.id]||{})[state.myId];
-      var pts = pred ? pointsForPrediction(m, pred) : null;
+      var eff = effectivePrediction(m, state.myId);
+      var pts = eff ? pointsForPrediction(m, eff.pred) : null;
       html += '<div class="match-actions">';
-      if(pred){
-        html += '<span class="points-pill'+(pts===0?' zero':'')+'">Tu predicción '+pred.home+'-'+pred.away+' · '+pts+' pts</span>';
+      if(eff){
+        var label = eff.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+eff.pred.home+'-'+eff.pred.away) : ('Tu predicción '+eff.pred.home+'-'+eff.pred.away);
+        html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+label+' · '+pts+' pts</span>';
       } else {
         html += '<span class="points-pill zero">No predijiste este partido</span>';
       }
@@ -576,7 +631,7 @@ const db = getFirestore(fbApp);
     if(!profile) return;
 
     var predictedMatches = state.matches.filter(function(m){
-      return (state.predictions[m.id] || {})[profileId] !== undefined;
+      return effectivePrediction(m, profileId) !== null;
     }).sort(function(a,b){ return new Date(b.kickoff||0) - new Date(a.kickoff||0); });
 
     var html = '<div class="modal-overlay" id="profile-detail-modal">';
@@ -589,13 +644,15 @@ const db = getFirestore(fbApp);
     } else {
       predictedMatches.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-        var pred = state.predictions[m.id][profileId];
+        var eff = effectivePrediction(m, profileId);
+        var pred = eff.pred;
         var hasResult = !(m.homeScore===null || m.homeScore===undefined);
         var pts = hasResult ? pointsForPrediction(m, pred) : null;
+        var predLabel = eff.auto ? '🤖 Predicción automática (Carlos Antonio Vélez)' : 'Predijo';
         html += '<div class="team-list-item" style="flex-wrap:wrap;">';
         html += '<div style="width:100%;font-size:13px;">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'</div>';
         html += '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-top:4px;">';
-        html += '<span>Predijo: <b style="color:var(--white);">'+pred.home+'-'+pred.away+'</b></span>';
+        html += '<span>'+predLabel+': <b style="color:var(--white);">'+pred.home+'-'+pred.away+'</b></span>';
         if(hasResult){
           html += '<span>Real: <b style="color:var(--white);">'+m.homeScore+'-'+m.awayScore+'</b></span>';
           html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+pts+' pts</span>';
@@ -831,6 +888,7 @@ const db = getFirestore(fbApp);
     var next = upcoming[0];
     var home = teamById(next.homeTeamId), away = teamById(next.awayTeamId);
     var missing = state.profiles.filter(function(p){
+      if(p.isBot) return false;
       var pred = (state.predictions[next.id]||{})[p.id];
       return !pred;
     });
@@ -933,11 +991,33 @@ const db = getFirestore(fbApp);
 
     html += '<div class="card">';
     html += '<div class="section-title">Perfiles y PIN (por si alguien lo olvida)</div>';
-    state.profiles.forEach(function(p){
+    var humanProfilesGestionar = state.profiles.filter(function(p){ return !p.isBot; });
+    humanProfilesGestionar.forEach(function(p){
       html += '<div class="admin-profile-row">'+avatarHtml(p,32)+'<div style="flex:1;font-size:13px;">'+p.name+'</div><span class="pin-pill">'+p.pin+'</span><button class="btn btn-danger" data-del-profile="'+p.id+'">Eliminar</button></div>';
     });
-    if(!state.profiles.length){ html += '<div class="empty" style="padding:14px 0;">Todavía no hay perfiles creados.</div>'; }
+    if(!humanProfilesGestionar.length){ html += '<div class="empty" style="padding:14px 0;">Todavía no hay perfiles creados.</div>'; }
     html += '</div>';
+
+    var bot = getBotProfile();
+    if(bot){
+      html += '<div class="card">';
+      html += '<div class="section-title">Carlos Antonio Vélez (predicción automática)</div>';
+      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Este perfil le genera un marcador aleatorio a cada partido nuevo, y se lo copia automáticamente a quien no haya predicho cuando el partido cierra. Aquí le pones foto y su pronóstico de pre-temporada.</div>';
+      html += '<div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">';
+      html += '<div id="bot-photo-preview">'+avatarHtml(bot,56)+'</div>';
+      html += '<label class="btn" style="cursor:pointer;"><span id="bot-photo-btn-label">Subir foto</span><input type="file" accept="image/*" id="bot-photo-file" style="display:none;"></label>';
+      html += '</div>';
+      var botPick = state.preseason.picks[bot.id] || {championTeamId:'', scorerName:''};
+      html += '<div class="form-row"><label>Campeón (pronóstico del bot)</label><select id="bot-champion">';
+      html += '<option value="">Selecciona un equipo</option>';
+      state.teams.forEach(function(t){
+        html += '<option value="'+t.id+'"'+(botPick.championTeamId===t.id?' selected':'')+'>'+t.name+'</option>';
+      });
+      html += '</select></div>';
+      html += '<div class="form-row"><label>Goleador (pronóstico del bot)</label><input type="text" id="bot-scorer" placeholder="Nombre del jugador" value="'+(botPick.scorerName||'').replace(/"/g,'&quot;')+'"></div>';
+      html += '<button class="btn btn-gold" id="save-bot-preseason-btn">Guardar pronóstico del bot</button>';
+      html += '</div>';
+    }
 
     html += '<div class="card">';
     html += '<div class="section-title">Tabla real de la liga</div>';
@@ -995,7 +1075,14 @@ const db = getFirestore(fbApp);
       if(!home || !away || home===away){ alert('Elige dos equipos distintos'); return; }
       btn.disabled = true;
       btn.textContent = 'Agregando...';
-      state.matches.push({ id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoff || null, phase:phase, homeScore:null, awayScore:null });
+      var newMatch = { id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoff || null, phase:phase, homeScore:null, awayScore:null };
+      state.matches.push(newMatch);
+      var botId = getBotProfileId();
+      if(botId){
+        var botScore = randomBotScore();
+        if(!state.predictions[newMatch.id]) state.predictions[newMatch.id] = {};
+        state.predictions[newMatch.id][botId] = { home: String(botScore.home), away: String(botScore.away) };
+      }
       await saveMatchesAndPredictions();
       renderGestionar(el);
     });
@@ -1115,6 +1202,45 @@ const db = getFirestore(fbApp);
         });
       });
     });
+
+    var botPhotoFile = document.getElementById('bot-photo-file');
+    if(botPhotoFile){
+      botPhotoFile.addEventListener('change', function(e){
+        var f = e.target.files[0];
+        if(!f) return;
+        var labelSpan = document.getElementById('bot-photo-btn-label');
+        botPhotoFile.disabled = true;
+        if(labelSpan) labelSpan.textContent = 'Procesando...';
+        resizeImageToDataUrl(f, 150).then(async function(dataUrl){
+          var bot = getBotProfile();
+          if(!bot) return;
+          bot.photo = dataUrl;
+          await saveProfile(bot);
+          renderGestionar(el);
+        }).catch(function(){
+          alert('No se pudo procesar la imagen.');
+          botPhotoFile.disabled = false;
+          if(labelSpan) labelSpan.textContent = 'Subir foto';
+        });
+      });
+    }
+
+    var saveBotPreseasonBtn = document.getElementById('save-bot-preseason-btn');
+    if(saveBotPreseasonBtn){
+      saveBotPreseasonBtn.addEventListener('click', async function(){
+        var btn = this;
+        var championTeamId = document.getElementById('bot-champion').value;
+        var scorerName = document.getElementById('bot-scorer').value.trim();
+        if(!championTeamId || !scorerName){ alert('Completa campeón y goleador'); return; }
+        var bot = getBotProfile();
+        if(!bot) return;
+        btn.disabled = true;
+        btn.textContent = 'Guardando...';
+        state.preseason.picks[bot.id] = { championTeamId:championTeamId, scorerName:scorerName };
+        await savePreseason();
+        renderGestionar(el);
+      });
+    }
 
     document.getElementById('add-team-btn').addEventListener('click', async function(){
       var btn = this;
