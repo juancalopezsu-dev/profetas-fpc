@@ -301,17 +301,24 @@ const db = getFirestore(fbApp);
     return new Date(match.kickoff).getTime() <= Date.now();
   }
 
+  // Datos por fase: etiqueta, clase CSS del badge y puntos por acertar
+  // resultado/marcador exacto. Único lugar donde viven estos números.
+  function phaseInfo(phase){
+    if(phase==='final') return { label:'Final', cssClass:'phase-final', exactPts:8, resultPts:4 };
+    if(phase==='cuadrangulares') return { label:'Cuadrangulares', cssClass:'phase-cuadrangulares', exactPts:5, resultPts:2 };
+    return { label:'Regular', cssClass:'phase-regular', exactPts:3, resultPts:1 };
+  }
+
   function pointsForPrediction(match, pred){
     if(!pred || pred.home===''||pred.home===undefined||pred.away===''||pred.away===undefined) return 0;
     var ph = parseInt(pred.home), pa = parseInt(pred.away);
     var rh = match.homeScore, ra = match.awayScore;
     if(isNaN(ph)||isNaN(pa)) return 0;
-    var exactPts = match.phase==='cuadrangulares' ? 5 : 3;
-    var resultPts = match.phase==='cuadrangulares' ? 2 : 1;
-    if(ph===rh && pa===ra) return exactPts;
+    var info = phaseInfo(match.phase);
+    if(ph===rh && pa===ra) return info.exactPts;
     var predOutcome = ph>pa?'H':(ph<pa?'A':'D');
     var realOutcome = rh>ra?'H':(rh<ra?'A':'D');
-    if(predOutcome===realOutcome) return resultPts;
+    if(predOutcome===realOutcome) return info.resultPts;
     return 0;
   }
 
@@ -432,6 +439,7 @@ const db = getFirestore(fbApp);
     {id:'predicciones', label:'Predicciones'},
     {id:'tabla', label:'Tabla'},
     {id:'pretemporada', label:'Pre-temporada'},
+    {id:'reglas', label:'Reglas'},
     {id:'perfil', label:'Mi perfil'},
     {id:'gestionar', label:'Gestionar'}
   ];
@@ -457,6 +465,7 @@ const db = getFirestore(fbApp);
     if(state.tab==='predicciones') return renderPredicciones(el);
     if(state.tab==='tabla') return renderTabla(el);
     if(state.tab==='pretemporada') return renderPretemporada(el);
+    if(state.tab==='reglas') return renderReglas(el);
     if(state.tab==='perfil') return renderPerfil(el);
     if(state.tab==='gestionar'){
       if(!state.adminUnlocked) return renderGestionarGate(el);
@@ -517,8 +526,8 @@ const db = getFirestore(fbApp);
 
   function matchCardHtml(m, editable, waitingResult){
     var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-    var phaseClass = m.phase==='cuadrangulares' ? 'phase-cuadrangulares' : 'phase-regular';
-    var phaseLabel = m.phase==='cuadrangulares' ? 'Cuadrangulares' : 'Regular';
+    var phaseClass = phaseInfo(m.phase).cssClass;
+    var phaseLabel = phaseInfo(m.phase).label;
     var myPred = (state.predictions[m.id]||{})[state.myId] || {home:'',away:''};
     var kickoffLabel = m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO', {weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}) : ('Fecha '+(m.matchday||'-'));
 
@@ -721,7 +730,7 @@ const db = getFirestore(fbApp);
     var ph = parseInt(pred.home), pa = parseInt(pred.away);
     if(isNaN(ph) || isNaN(pa)) return 'pill-neutral';
     var pts = pointsForPrediction(match, pred);
-    var exactPts = match.phase==='cuadrangulares' ? 5 : 3;
+    var exactPts = phaseInfo(match.phase).exactPts;
     if(pts === exactPts) return 'pill-green';
     if(pts > 0) return 'pill-yellow';
     return 'pill-red';
@@ -830,6 +839,38 @@ const db = getFirestore(fbApp);
         renderPretemporada(el);
       });
     }
+  }
+
+  /* ---------- REGLAS ---------- */
+  function renderReglas(el){
+    var html = '<div class="card">';
+    html += '<div class="section-title">Cómo se juega Los Profetas del FPC</div>';
+    html += '<p style="font-size:13px;line-height:1.5;color:var(--white);margin:0;">Cada partido de la Liga BetPlay lo predices antes de que empiece — puedes cambiar tu predicción las veces que quieras hasta el pitazo inicial, después queda cerrada.</p>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<div class="section-title">Puntos por fase</div>';
+    html += '<div class="rules-phase-row"><span class="phase-badge phase-regular">Regular</span><span class="rules-phase-pts">1 punto por acertar el resultado (quién gana o empate) · 3 puntos por acertar el marcador exacto</span></div>';
+    html += '<div class="rules-phase-row"><span class="phase-badge phase-cuadrangulares">Cuadrangulares</span><span class="rules-phase-pts">2 puntos por acertar el resultado · 5 puntos por acertar el marcador exacto</span></div>';
+    html += '<div class="rules-phase-row"><span class="phase-badge phase-final">Final</span><span class="rules-phase-pts">4 puntos por acertar el resultado · 8 puntos por acertar el marcador exacto</span></div>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<div class="section-title">Pre-temporada</div>';
+    html += '<p style="font-size:13px;line-height:1.5;color:var(--white);margin:0;">Antes de que arranque la liga, cada quien elige quién cree que será el campeón y quién el goleador de la temporada. Acertar cada uno da <b>12 puntos</b>.</p>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<div class="section-title">Si se te olvida predecir un partido</div>';
+    html += '<p style="font-size:13px;line-height:1.5;color:var(--white);margin:0;">Automáticamente se usa la predicción de <b>Carlos Antonio Vélez</b> (nuestro "profeta" de respaldo) en tu lugar.</p>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<div class="section-title">Cambios de resultado</div>';
+    html += '<p style="font-size:13px;line-height:1.5;color:var(--white);margin:0;">Si la Dimayor corrige oficialmente un resultado, el administrador lo actualiza y los puntos de todos se recalculan automáticamente.</p>';
+    html += '</div>';
+
+    el.innerHTML = html;
   }
 
   /* ---------- MI PERFIL ---------- */
@@ -996,7 +1037,7 @@ const db = getFirestore(fbApp);
     html += '<div class="form-row"><label>Local</label><select id="m-home">'+teamOptions()+'</select></div>';
     html += '<div class="form-row"><label>Visitante</label><select id="m-away">'+teamOptions()+'</select></div>';
     html += '<div class="form-row"><label>Fecha y hora de inicio</label><input type="datetime-local" id="m-kickoff"></div>';
-    html += '<div class="form-row"><label>Fase</label><select id="m-phase"><option value="regular">Regular</option><option value="cuadrangulares">Cuadrangulares</option></select></div>';
+    html += '<div class="form-row"><label>Fase</label><select id="m-phase"><option value="regular">Regular</option><option value="cuadrangulares">Cuadrangulares</option><option value="final">Final</option></select></div>';
     html += '</div>';
     html += '<button class="btn btn-gold" id="add-match-btn">Agregar partido</button>';
     html += '</div>';
@@ -1014,7 +1055,7 @@ const db = getFirestore(fbApp);
       pending.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
         html += '<div class="team-list-item">';
-        html += '<div style="flex:1;font-size:13px;">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'<div style="font-size:11px;color:var(--muted);">'+(m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO') : 'Sin hora')+' · '+(m.phase==='cuadrangulares'?'Cuadrangulares':'Regular')+'</div></div>';
+        html += '<div style="flex:1;font-size:13px;">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'<div style="font-size:11px;color:var(--muted);">'+(m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO') : 'Sin hora')+' · '+phaseInfo(m.phase).label+'</div></div>';
         html += '<input type="number" min="0" style="width:44px;" data-res-home="'+m.id+'">';
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-res-away="'+m.id+'">';

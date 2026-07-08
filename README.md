@@ -11,6 +11,8 @@ App familiar de predicciones de la Liga BetPlay FPC.
 - `api/resultados.js` — función serverless de Vercel que consulta API-Football de forma segura
 - `api/actualizar-resultados.js` — función serverless (Vercel Cron) que actualiza resultados automáticamente usando el Admin SDK de Firebase
 - `vercel.json` — configura el Cron Job que corre `api/actualizar-resultados` 2 veces al día
+- `manifest.json` — manifiesto PWA para poder "agregar a inicio" en el celular
+- `icons/` — íconos de la app (`icon-192.png`, `icon-512.png`, `apple-touch-icon.png`) usados por el manifiesto y por iOS
 
 ## Pasos para publicar (una sola vez)
 
@@ -84,3 +86,6 @@ Vercel va a detectar el push y redesplegar la app sola — no necesitas volver a
   - Cuando un partido cierra (llega el `kickoff`), a cualquier persona que no haya predicho se le "presta" la predicción del bot para efectos de puntaje y de visualización — pero esto **no se escribe en Firestore**: `effectivePrediction()` lo calcula al vuelo en cada carga, así siempre refleja el estado real sin depender de un disparador exacto a la hora de cierre. En la tarjeta y en el detalle de la persona se etiqueta como "🤖 Predicción automática (Carlos Antonio Vélez): X-Y" para distinguirla de una predicción propia.
 - **Columnas de goleador y campeón en la tabla**: en Tabla → "Nuestra apuesta", cada fila muestra además el nombre del goleador y el escudo del campeón que esa persona puso en su pronóstico de pre-temporada (o "-" si todavía no lo ha hecho). El resto de la fila sigue siendo clickeable para abrir el detalle de predicciones.
 - **Ver predicciones de todos por partido**: en Predicciones, los partidos ya cerrados (esperando resultado o finalizados) tienen un botón "Ver predicciones" que abre un modal con el marcador de cada persona en una pastilla de color — verde si acertó el marcador exacto, amarillo si acertó el resultado pero no el marcador, rojo si no acertó nada, gris si el partido aún no tiene resultado. Las predicciones automáticas del bot se marcan igual que en las tarjetas ("🤖 Predicción automática..."). Este botón solo aparece en partidos ya cerrados — antes de esa hora las predicciones ajenas siguen sin ser visibles, para no arruinar la sorpresa.
+- **Puntos por fase**: `phaseInfo()` centraliza los puntos de cada fase — Regular (1 pt resultado / 3 pts marcador exacto), Cuadrangulares (2/5) y Final (4/8). La fase "Final" se elige igual que las otras al crear un partido en Gestionar.
+- **Pestaña Reglas**: explica cómo se juega, los puntos por fase, pre-temporada, la predicción automática de respaldo y los cambios de resultado — pensada para compartir con la familia sin tener que explicar todo por WhatsApp.
+- **PWA ("agregar a inicio")**: `manifest.json` + los íconos en `icons/` permiten instalar la app desde el navegador (Android: menú → "Agregar a pantalla de inicio"; iPhone: compartir → "Agregar a pantalla de inicio", usa el `apple-touch-icon.png`). El `theme-color` (#0E2A2E) colorea la barra del navegador para que se vea integrada con la app.
