@@ -507,6 +507,12 @@ const db = getFirestore(fbApp);
         renderPredicciones(el);
       });
     });
+
+    el.querySelectorAll('[data-show-match-preds]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        showMatchPredictionsModal(btn.getAttribute('data-show-match-preds'));
+      });
+    });
   }
 
   function matchCardHtml(m, editable, waitingResult){
@@ -543,8 +549,9 @@ const db = getFirestore(fbApp);
       html += '<div class="match-actions"><span class="locked-tag">Predicción cerrada</span>';
       if(effW){
         var labelW = effW.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+effW.pred.home+'-'+effW.pred.away) : ('Tu predicción: '+effW.pred.home+'-'+effW.pred.away);
-        html += '<span class="points-pill" style="margin-left:8px;">'+labelW+'</span>';
+        html += '<span class="points-pill">'+labelW+'</span>';
       }
+      html += '<button class="btn" data-show-match-preds="'+m.id+'">Ver predicciones</button>';
       html += '</div>';
     } else {
       var eff = effectivePrediction(m, state.myId);
@@ -556,6 +563,7 @@ const db = getFirestore(fbApp);
       } else {
         html += '<span class="points-pill zero">No predijiste este partido</span>';
       }
+      html += '<button class="btn" data-show-match-preds="'+m.id+'">Ver predicciones</button>';
       html += '</div>';
     }
     html += '</div>';
@@ -574,13 +582,22 @@ const db = getFirestore(fbApp);
       if(!rows.length){
         html += '<div class="empty">Todavía no hay jugadores.</div>';
       } else {
+        html += '<div style="font-size:9px; color:var(--muted); display:flex; align-items:center; padding:0 14px; margin-bottom:4px; gap:12px;">';
+        html += '<span style="width:28px;"></span><span style="width:38px;"></span><span style="flex:1;"></span>';
+        html += '<span style="width:52px;text-align:center;">Goleador</span><span style="width:28px;text-align:center;">Campeón</span><span style="width:60px;"></span>';
+        html += '</div>';
         rows.forEach(function(r, i){
           var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
+          var pick = state.preseason.picks[r.profile.id];
+          var champT = pick ? teamById(pick.championTeamId) : null;
+          var scorerName = pick && pick.scorerName ? pick.scorerName : '';
           html += '<div class="board-row'+(i===0?' top1':'')+'" data-profile-detail="'+r.profile.id+'" style="cursor:pointer;">';
           html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
           html += avatarHtml(r.profile, 38);
-          html += '<div class="board-name">'+r.profile.name+'</div>';
-          html += '<div><div class="board-points">'+r.points+'</div><span class="board-points-label">Puntos</span></div>';
+          html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+r.profile.name+'</div>';
+          html += '<div style="width:52px;text-align:center;font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+(scorerName?scorerName.replace(/"/g,'&quot;'):'')+'">'+(scorerName || '-')+'</div>';
+          html += '<div style="width:28px;display:flex;justify-content:center;">'+(champT ? shieldHtml(champT,24) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
+          html += '<div style="width:60px;"><div class="board-points">'+r.points+'</div><span class="board-points-label">Puntos</span></div>';
           html += '</div>';
         });
       }
@@ -625,8 +642,12 @@ const db = getFirestore(fbApp);
     });
   }
 
+  function closeModal(){
+    document.querySelectorAll('.modal-overlay').forEach(function(m){ m.remove(); });
+  }
+
   function showProfileDetailModal(profileId){
-    closeProfileDetailModal();
+    closeModal();
     var profile = profileById(profileId);
     if(!profile) return;
 
@@ -690,15 +711,65 @@ const db = getFirestore(fbApp);
     wrapper.innerHTML = html;
     document.body.appendChild(wrapper.firstChild);
 
-    document.getElementById('close-profile-detail').addEventListener('click', closeProfileDetailModal);
+    document.getElementById('close-profile-detail').addEventListener('click', closeModal);
     document.getElementById('profile-detail-modal').addEventListener('click', function(e){
-      if(e.target.id === 'profile-detail-modal') closeProfileDetailModal();
+      if(e.target.id === 'profile-detail-modal') closeModal();
     });
   }
 
-  function closeProfileDetailModal(){
-    var m = document.getElementById('profile-detail-modal');
-    if(m) m.remove();
+  function predictionPillClass(match, pred){
+    var ph = parseInt(pred.home), pa = parseInt(pred.away);
+    if(isNaN(ph) || isNaN(pa)) return 'pill-neutral';
+    var pts = pointsForPrediction(match, pred);
+    var exactPts = match.phase==='cuadrangulares' ? 5 : 3;
+    if(pts === exactPts) return 'pill-green';
+    if(pts > 0) return 'pill-yellow';
+    return 'pill-red';
+  }
+
+  function showMatchPredictionsModal(matchId){
+    closeModal();
+    var match = state.matches.find(function(m){ return m.id === matchId; });
+    if(!match) return;
+    var home = teamById(match.homeTeamId), away = teamById(match.awayTeamId);
+    var hasResult = !(match.homeScore===null || match.homeScore===undefined);
+
+    var html = '<div class="modal-overlay" id="match-predictions-modal">';
+    html += '<div class="modal-box">';
+    html += '<div class="modal-header"><div class="modal-title">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'</div><button class="btn" id="close-match-predictions">Cerrar</button></div>';
+    if(hasResult){
+      html += '<div style="text-align:center;font-family:\'Oswald\',sans-serif;font-size:24px;font-weight:700;margin:10px 0;color:var(--gold);">'+match.homeScore+' - '+match.awayScore+'</div>';
+    } else {
+      html += '<div style="text-align:center;font-size:12px;color:var(--muted);margin:10px 0;">Todavía no hay resultado cargado</div>';
+    }
+    html += '<div class="section-title" style="margin-top:6px;">Predicciones de todos</div>';
+
+    state.profiles.forEach(function(p){
+      var eff = effectivePrediction(match, p.id);
+      html += '<div class="team-list-item">';
+      html += avatarHtml(p, 30);
+      html += '<div style="flex:1;font-size:13px;">'+p.name;
+      if(eff && eff.auto){ html += '<div style="font-size:10px;color:var(--muted);">🤖 Predicción automática (Carlos Antonio Vélez)</div>'; }
+      html += '</div>';
+      if(eff){
+        var cls = hasResult ? predictionPillClass(match, eff.pred) : 'pill-neutral';
+        html += '<span class="pred-pill '+cls+'">'+eff.pred.home+'-'+eff.pred.away+'</span>';
+      } else {
+        html += '<span class="pred-pill pill-neutral">No predijo</span>';
+      }
+      html += '</div>';
+    });
+
+    html += '</div></div>';
+
+    var wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    document.body.appendChild(wrapper.firstChild);
+
+    document.getElementById('close-match-predictions').addEventListener('click', closeModal);
+    document.getElementById('match-predictions-modal').addEventListener('click', function(e){
+      if(e.target.id === 'match-predictions-modal') closeModal();
+    });
   }
 
   /* ---------- PRETEMPORADA ---------- */
