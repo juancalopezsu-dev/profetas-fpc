@@ -352,11 +352,12 @@ const db = getFirestore(fbApp);
     });
     if(state.preseason.result){
       var res = state.preseason.result;
+      var scorerCorrectIds = res.scorerCorrectIds || [];
       Object.keys(state.preseason.picks).forEach(function(pid){
         var pick = state.preseason.picks[pid];
         if(!(pid in totals)) totals[pid]=0;
         if(res.championTeamId && pick.championTeamId===res.championTeamId) totals[pid]+=12;
-        if(res.scorerName && pick.scorerName && pick.scorerName.trim().toLowerCase()===res.scorerName.trim().toLowerCase()) totals[pid]+=12;
+        if(scorerCorrectIds.indexOf(pid)>=0) totals[pid]+=12;
       });
     }
     var rows = state.profiles.map(function(p){ return {profile:p, points: totals[p.id]||0}; });
@@ -707,7 +708,7 @@ const db = getFirestore(fbApp);
       html += '</div>';
       html += '<div style="font-size:13px;margin-top:6px;">Goleador: <b>'+(pick.scorerName||'-')+'</b>';
       if(res && res.locked){
-        var scorerOk = res.scorerName && pick.scorerName && pick.scorerName.trim().toLowerCase()===res.scorerName.trim().toLowerCase();
+        var scorerOk = (res.scorerCorrectIds||[]).indexOf(profileId)>=0;
         html += scorerOk ? ' <span class="points-pill">✔ +12 pts</span>' : ' <span class="points-pill zero">✘</span>';
       }
       html += '</div>';
@@ -783,7 +784,7 @@ const db = getFirestore(fbApp);
 
   /* ---------- PRETEMPORADA ---------- */
   function renderPretemporada(el){
-    var locked = !!(state.preseason.result && state.preseason.result.locked);
+    var locked = !!(state.preseason.picksLocked || (state.preseason.result && state.preseason.result.locked));
     var myPick = state.preseason.picks[state.myId] || {championTeamId:'', scorerName:''};
 
     var html = '<div class="card">';
@@ -1149,15 +1150,36 @@ const db = getFirestore(fbApp);
     html += '</div>';
 
     html += '<div class="card">';
-    html += '<div class="section-title">Cerrar pre-temporada</div>';
-    var locked = state.preseason.result && state.preseason.result.locked;
-    if(locked){
-      html += '<div class="locked-note">Ya se cerró y se cargó el resultado de pre-temporada.</div>';
+    html += '<div class="section-title">Pre-temporada</div>';
+    var picksLocked = !!state.preseason.picksLocked;
+    var resultLocked = !!(state.preseason.result && state.preseason.result.locked);
+    if(resultLocked){
+      html += '<div class="locked-note">Ya se cerró y se calificó la pre-temporada.</div>';
       html += '<button class="btn" id="reopen-preseason" style="margin-top:10px;">Reabrir pronósticos</button>';
+    } else if(!picksLocked){
+      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Bloquea los pronósticos de campeón y goleador de todos para que nadie los siga cambiando. Hazlo cuando la liga esté por arrancar; después podrás calificar con el resultado real.</div>';
+      html += '<button class="btn btn-gold" id="lock-picks-btn">Cerrar predicciones de pre-temporada</button>';
     } else {
-      html += '<div class="form-row"><label>Campeón real</label><select id="ps-champion">'+teamOptions()+'</select></div>';
-      html += '<div class="form-row"><label>Goleador real</label><input type="text" id="ps-scorer" placeholder="Nombre del jugador"></div>';
-      html += '<button class="btn btn-gold" id="lock-preseason-btn">Cerrar y calificar (12 pts c/u)</button>';
+      html += '<div class="locked-note">Las predicciones ya están bloqueadas. Cuando sepas el resultado real, califica aquí.</div>';
+      html += '<div class="form-row" style="margin-top:10px;"><label>Campeón real</label><select id="ps-champion">'+teamOptions()+'</select></div>';
+      html += '<div class="form-row"><label>Goleador real (solo informativo — no califica automático)</label><input type="text" id="ps-scorer" placeholder="Nombre del jugador"></div>';
+      html += '<div class="section-title" style="margin-top:14px;">¿Quién acertó el goleador?</div>';
+      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Marca a cada persona cuyo goleador fue el correcto — puede haber más de una si lo escribieron distinto pero es la misma persona.</div>';
+      var picksEntries = Object.keys(state.preseason.picks);
+      if(!picksEntries.length){
+        html += '<div class="empty" style="padding:14px 0;">Nadie hizo su pronóstico de pre-temporada.</div>';
+      } else {
+        picksEntries.forEach(function(pid){
+          var p = profileById(pid); if(!p) return;
+          var pick = state.preseason.picks[pid];
+          html += '<label class="scorer-check-row">';
+          html += '<input type="checkbox" data-scorer-correct="'+pid+'">';
+          html += '<span style="flex:1;">'+p.name+'</span>';
+          html += '<span style="color:var(--muted);">'+(pick.scorerName||'-')+'</span>';
+          html += '</label>';
+        });
+      }
+      html += '<button class="btn btn-gold" id="lock-preseason-btn" style="margin-top:12px;">Cerrar y calificar</button>';
     }
     html += '</div>';
 
@@ -1399,16 +1421,33 @@ const db = getFirestore(fbApp);
       });
     }
 
+    var lockPicksBtn = document.getElementById('lock-picks-btn');
+    if(lockPicksBtn){
+      lockPicksBtn.addEventListener('click', async function(){
+        var btn = this;
+        if(!confirm('¿Bloquear las predicciones de pre-temporada? Nadie podrá cambiarlas después.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Bloqueando...';
+        state.preseason.picksLocked = true;
+        await savePreseason();
+        renderGestionar(el);
+      });
+    }
     var lockBtn = document.getElementById('lock-preseason-btn');
     if(lockBtn){
       lockBtn.addEventListener('click', async function(){
         var btn = this;
         var championTeamId = document.getElementById('ps-champion').value;
         var scorerName = document.getElementById('ps-scorer').value.trim();
-        if(!championTeamId || !scorerName){ alert('Completa campeón y goleador reales'); return; }
+        if(!championTeamId){ alert('Selecciona el campeón real'); return; }
+        var scorerCorrectIds = [];
+        el.querySelectorAll('[data-scorer-correct]').forEach(function(cb){
+          if(cb.checked) scorerCorrectIds.push(cb.getAttribute('data-scorer-correct'));
+        });
         btn.disabled = true;
         btn.textContent = 'Guardando...';
-        state.preseason.result = { championTeamId:championTeamId, scorerName:scorerName, locked:true };
+        state.preseason.picksLocked = true;
+        state.preseason.result = { championTeamId:championTeamId, scorerName:scorerName, scorerCorrectIds:scorerCorrectIds, locked:true };
         await savePreseason();
         renderGestionar(el);
       });
@@ -1417,9 +1456,11 @@ const db = getFirestore(fbApp);
     if(reopenBtn){
       reopenBtn.addEventListener('click', async function(){
         var btn = this;
+        if(!confirm('¿Reabrir los pronósticos de pre-temporada? Se perderá la calificación del goleador y todos podrán volver a editar su pronóstico.')) return;
         btn.disabled = true;
         btn.textContent = 'Reabriendo...';
         state.preseason.result = null;
+        state.preseason.picksLocked = false;
         await savePreseason();
         renderGestionar(el);
       });
