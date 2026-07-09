@@ -188,6 +188,7 @@ const db = getFirestore(fbApp);
 
   function localGet(key){ try{ return localStorage.getItem(key); }catch(e){ return null; } }
   function localSet(key, val){ try{ localStorage.setItem(key, val); }catch(e){} }
+  function localRemove(key){ try{ localStorage.removeItem(key); }catch(e){} }
 
   async function loadAll(){
     // Las 6 lecturas son independientes entre sí, así que corren en paralelo
@@ -893,6 +894,11 @@ const db = getFirestore(fbApp);
     html += '<button class="btn btn-gold" id="save-perfil-btn" style="width:100%;margin-top:8px;">Guardar cambios</button>';
     html += '<div id="perfil-msg" style="font-size:12px;margin-top:8px;"></div>';
     html += '</div>';
+
+    html += '<div class="card" style="max-width:360px;margin:0 auto;">';
+    html += '<button class="btn btn-danger" id="logout-btn" style="width:100%;">Cerrar sesión</button>';
+    html += '<div style="font-size:11px;color:var(--muted);margin-top:8px;text-align:center;">Solo cierra tu sesión en este navegador. Tus predicciones y las de todos siguen guardadas.</div>';
+    html += '</div>';
     el.innerHTML = html;
 
     function renderPhotoPreview(){
@@ -942,6 +948,11 @@ const db = getFirestore(fbApp);
       await saveProfile(me);
       renderShell();
       renderPerfil(el);
+    });
+
+    document.getElementById('logout-btn').addEventListener('click', function(){
+      if(!confirm('¿Cerrar sesión? Tendrás que volver a elegir tu perfil y escribir tu PIN para entrar de nuevo.')) return;
+      logout();
     });
   }
 
@@ -1479,6 +1490,16 @@ const db = getFirestore(fbApp);
     document.getElementById('main-shell').classList.remove('hidden');
     renderShell();
     renderView();
+  }
+
+  // Solo cierra la sesión de este navegador (borra el perfil "activo" guardado
+  // en localStorage) — no toca nada en Firestore, todos los datos siguen intactos.
+  function logout(){
+    state.myId = null;
+    localRemove('profetas-my-id');
+    state.tab = 'predicciones';
+    document.getElementById('main-shell').classList.add('hidden');
+    renderLogin();
   }
 
   async function boot(){
