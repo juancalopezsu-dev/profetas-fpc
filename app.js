@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch
+  getFirestore, doc, getDoc, setDoc, collection, deleteDoc, writeBatch, onSnapshot
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -126,15 +126,6 @@ const db = getFirestore(fbApp);
   // para no toparnos con el límite de 1MB por documento cuando hay escudos en base64.
   function teamsCol(){ return collection(db, 'profetas', 'teams', 'teams'); }
 
-  async function loadTeams(){
-    try{
-      var snap = await getDocs(teamsCol());
-      var list = [];
-      snap.forEach(function(docSnap){ list.push(docSnap.data()); });
-      list.sort(function(a,b){ return a.name.localeCompare(b.name); });
-      return list;
-    }catch(e){ console.error('load teams error', e); return []; }
-  }
   async function saveTeam(team){
     try{ await setDoc(doc(db, 'profetas', 'teams', 'teams', team.id), team); }
     catch(e){ console.error('save team error', team.id, e); alert('No se pudo guardar el equipo. Revisa tu conexión.'); }
@@ -158,15 +149,6 @@ const db = getFirestore(fbApp);
   // fotos de perfil en base64 no topen el límite de 1MB de un solo documento.
   function profilesCol(){ return collection(db, 'profetas', 'profiles', 'profiles'); }
 
-  async function loadProfiles(){
-    try{
-      var snap = await getDocs(profilesCol());
-      var list = [];
-      snap.forEach(function(docSnap){ list.push(docSnap.data()); });
-      list.sort(function(a,b){ return a.name.localeCompare(b.name); });
-      return list;
-    }catch(e){ console.error('load profiles error', e); return []; }
-  }
   async function saveProfile(profile){
     try{ await setDoc(doc(db, 'profetas', 'profiles', 'profiles', profile.id), profile); }
     catch(e){ console.error('save profile error', profile.id, e); alert('No se pudo guardar el perfil. Revisa tu conexión.'); }
@@ -190,19 +172,101 @@ const db = getFirestore(fbApp);
   function localSet(key, val){ try{ localStorage.setItem(key, val); }catch(e){} }
   function localRemove(key){ try{ localStorage.removeItem(key); }catch(e){} }
 
+  /* ---------- TIEMPO REAL ---------- */
+  // En vez de leer una sola vez con getDoc/getDocs, nos suscribimos con
+  // onSnapshot: la primera vez que llega el dato resuelve la promesa (así
+  // loadAll() sigue esperando la carga inicial como antes), y cada cambio
+  // posterior en Firestore (otra persona prediciendo, el admin cargando un
+  // resultado, etc.) actualiza el estado y refresca la pantalla sola, sin
+  // que nadie tenga que recargar la página.
+  var unsubscribers = [];
+
+  function watchDoc(name, applyFn, onUpdate){
+    return new Promise(function(resolve){
+      var first = true;
+      var unsub = onSnapshot(doc(db, 'profetas', name), function(snap){
+        applyFn(snap.exists() ? snap.data() : null);
+        if(first){ first = false; resolve(); }
+        else if(onUpdate){ onUpdate(); }
+      }, function(err){
+        console.error('watchDoc error', name, err);
+        if(first){ first = false; resolve(); }
+      });
+      unsubscribers.push(unsub);
+    });
+  }
+
+  function watchCollection(colRef, applyFn, onUpdate){
+    return new Promise(function(resolve){
+      var first = true;
+      var unsub = onSnapshot(colRef, function(snap){
+        var list = [];
+        snap.forEach(function(docSnap){ list.push(docSnap.data()); });
+        applyFn(list);
+        if(first){ first = false; resolve(); }
+        else if(onUpdate){ onUpdate(); }
+      }, function(err){
+        console.error('watchCollection error', err);
+        if(first){ first = false; resolve(); }
+      });
+      unsubscribers.push(unsub);
+    });
+  }
+
+  // Vuelve a pintar la pantalla actual (login o la pestaña activa) con el
+  // estado ya actualizado. Si la persona está escribiendo algo en ese
+  // momento (un input/select dentro de la vista visible), no interrumpe —
+  // el próximo render (al terminar de escribir, cambiar de pestaña, guardar,
+  // etc.) ya va a usar el estado más reciente igual.
+  function refreshCurrentView(){
+    var mainShell = document.getElementById('main-shell');
+    var loginView = document.getElementById('login-view');
+    var active = document.activeElement;
+    var isFormField = active && (active.tagName==='INPUT' || active.tagName==='TEXTAREA' || active.tagName==='SELECT');
+    if(mainShell && !mainShell.classList.contains('hidden')){
+      var viewEl = document.getElementById('view');
+      if(isFormField && viewEl && viewEl.contains(active)) return;
+      renderShell();
+      renderView();
+    } else if(loginView && !loginView.classList.contains('hidden')){
+      if(isFormField && loginView.contains(active)) return;
+      renderLogin();
+    }
+  }
+
   async function loadAll(){
-    // Las 6 lecturas son independientes entre sí, así que corren en paralelo
-    // con Promise.all en vez de una por una — esto es lo que más pesa en la
-    // carga inicial, sobre todo en redes móviles con más latencia.
-    var results = await Promise.all([
-      loadProfiles(),
-      loadTeams(),
-      loadDoc('matches', {matches:[], predictions:{}}),
-      loadDoc('preseason', { picks:{}, result:null }),
-      loadDoc('realStandings', { data:{} }),
-      loadDoc('admin', { password:null })
-    ]);
-    state.profiles = results[0];
+    unsubscribers.forEach(function(fn){ try{ fn(); }catch(e){} });
+    unsubscribers = [];
+
+    var profilesPromise = watchCollection(profilesCol(), function(list){
+      list.sort(function(a,b){ return a.name.localeCompare(b.name); });
+      state.profiles = list;
+    }, refreshCurrentView);
+
+    var teamsPromise = watchCollection(teamsCol(), function(list){
+      list.sort(function(a,b){ return a.name.localeCompare(b.name); });
+      state.teams = list;
+    }, refreshCurrentView);
+
+    var matchesPromise = watchDoc('matches', function(data){
+      state.matches = (data && data.matches) || [];
+      state.predictions = (data && data.predictions) || {};
+    }, refreshCurrentView);
+
+    var preseasonPromise = watchDoc('preseason', function(data){
+      state.preseason = data || { picks:{}, result:null };
+    }, refreshCurrentView);
+
+    var realStandingsPromise = watchDoc('realStandings', function(data){
+      state.realStandings = (data && data.data) || {};
+    }, refreshCurrentView);
+
+    var adminPromise = watchDoc('admin', function(data){
+      state.adminPassword = data ? data.password : null;
+    }, refreshCurrentView);
+
+    await Promise.all([profilesPromise, teamsPromise, matchesPromise, preseasonPromise, realStandingsPromise, adminPromise]);
+
     if(!state.profiles.length){
       var legacyProfilesDoc = await loadDoc('profiles', null);
       if(legacyProfilesDoc && legacyProfilesDoc.list && legacyProfilesDoc.list.length){
@@ -213,7 +277,6 @@ const db = getFirestore(fbApp);
     }
     await ensureBotProfile();
 
-    state.teams = results[1];
     if(!state.teams.length){
       var legacyTeamsDoc = await loadDoc('teams', null);
       if(legacyTeamsDoc && legacyTeamsDoc.list && legacyTeamsDoc.list.length){
@@ -223,18 +286,6 @@ const db = getFirestore(fbApp);
       }
       await migrateTeamsToSubcollection(state.teams);
     }
-
-    var matchesDoc = results[2];
-    state.matches = matchesDoc.matches || [];
-    state.predictions = matchesDoc.predictions || {};
-
-    state.preseason = results[3];
-
-    var rsDoc = results[4];
-    state.realStandings = rsDoc.data || {};
-
-    var adminDoc = results[5];
-    state.adminPassword = adminDoc.password;
 
     state.myId = localGet('profetas-my-id');
   }
@@ -676,20 +727,28 @@ const db = getFirestore(fbApp);
     } else {
       predictedMatches.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-        var eff = effectivePrediction(m, profileId);
-        var pred = eff.pred;
-        var hasResult = !(m.homeScore===null || m.homeScore===undefined);
-        var pts = hasResult ? pointsForPrediction(m, pred) : null;
-        var predLabel = eff.auto ? '🤖 Predicción automática (Carlos Antonio Vélez)' : 'Predijo';
+        // Las predicciones ajenas de partidos que todavía no arrancan quedan
+        // ocultas para que nadie pueda copiarse antes del pitazo inicial —
+        // las propias sí se muestran siempre, ya que uno ya sabe qué predijo.
+        var showScore = isLocked(m) || profileId === state.myId;
         html += '<div class="team-list-item" style="flex-wrap:wrap;">';
         html += '<div style="width:100%;font-size:13px;">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'</div>';
         html += '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-top:4px;">';
-        html += '<span>'+predLabel+': <b style="color:var(--white);">'+pred.home+'-'+pred.away+'</b></span>';
-        if(hasResult){
-          html += '<span>Real: <b style="color:var(--white);">'+m.homeScore+'-'+m.awayScore+'</b></span>';
-          html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+pts+' pts</span>';
+        if(!showScore){
+          html += '<span>🔒 Oculto hasta que inicie el partido</span>';
         } else {
-          html += '<span>Sin resultado todavía</span>';
+          var eff = effectivePrediction(m, profileId);
+          var pred = eff.pred;
+          var hasResult = !(m.homeScore===null || m.homeScore===undefined);
+          var pts = hasResult ? pointsForPrediction(m, pred) : null;
+          var predLabel = eff.auto ? '🤖 Predicción automática (Carlos Antonio Vélez)' : 'Predijo';
+          html += '<span>'+predLabel+': <b style="color:var(--white);">'+pred.home+'-'+pred.away+'</b></span>';
+          if(hasResult){
+            html += '<span>Real: <b style="color:var(--white);">'+m.homeScore+'-'+m.awayScore+'</b></span>';
+            html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+pts+' pts</span>';
+          } else {
+            html += '<span>Sin resultado todavía</span>';
+          }
         }
         html += '</div></div>';
       });
