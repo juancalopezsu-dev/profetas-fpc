@@ -276,6 +276,7 @@ const db = getFirestore(fbApp);
       }
     }
     await ensureBotProfile();
+    await fillMissingBotPredictions();
 
     if(!state.teams.length){
       var legacyTeamsDoc = await loadDoc('teams', null);
@@ -328,6 +329,28 @@ const db = getFirestore(fbApp);
       tries++;
     } while(BOT_COMMON_SCORES.some(function(s){ return s[0]===home && s[1]===away; }) && tries < 20);
     return { home: home, away: away };
+  }
+
+  // Rellena con un marcador aleatorio la predicción del bot en cualquier
+  // partido que ya exista pero que se haya quedado sin ella (ej. partidos
+  // creados antes de que existiera el bot, o antes de esta función). Se
+  // corre sola al cargar la app y también hay un botón manual en Gestionar.
+  async function fillMissingBotPredictions(){
+    var botId = getBotProfileId();
+    if(!botId) return 0;
+    var filled = 0;
+    state.matches.forEach(function(m){
+      if(!state.predictions[m.id]) state.predictions[m.id] = {};
+      if(!state.predictions[m.id][botId]){
+        var score = randomBotScore();
+        state.predictions[m.id][botId] = { home: String(score.home), away: String(score.away) };
+        filled++;
+      }
+    });
+    if(filled > 0){
+      await saveMatchesAndPredictions();
+    }
+    return filled;
   }
 
   function shieldHtml(team, size){
@@ -1190,6 +1213,9 @@ const db = getFirestore(fbApp);
       html += '<div id="bot-photo-preview">'+avatarHtml(bot,56)+'</div>';
       html += '<label class="btn" style="cursor:pointer;"><span id="bot-photo-btn-label">Subir foto</span><input type="file" accept="image/*" id="bot-photo-file" style="display:none;"></label>';
       html += '</div>';
+      html += '<div class="auto-fetch-row">';
+      html += '<button class="btn" id="fill-bot-preds-btn">Generar predicciones faltantes de Carlos Antonio Vélez</button>';
+      html += '</div>';
       var botPick = state.preseason.picks[bot.id] || {championTeamId:'', scorerName:''};
       html += '<div class="form-row"><label>Campeón (pronóstico del bot)</label><select id="bot-champion">';
       html += '<option value="">Selecciona un equipo</option>';
@@ -1426,6 +1452,23 @@ const db = getFirestore(fbApp);
           botPhotoFile.disabled = false;
           if(labelSpan) labelSpan.textContent = 'Subir foto';
         });
+      });
+    }
+
+    var fillBotPredsBtn = document.getElementById('fill-bot-preds-btn');
+    if(fillBotPredsBtn){
+      fillBotPredsBtn.addEventListener('click', async function(){
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Generando...';
+        var filled = await fillMissingBotPredictions();
+        // Usamos alert() (no un span de estado) porque si se generó algo,
+        // el guardado dispara el listener en tiempo real de 'matches', que
+        // repinta Gestionar solo — un texto de estado normal se borraría
+        // en esa carrera. El alert() siempre se alcanza a ver.
+        btn.disabled = false;
+        btn.textContent = 'Generar predicciones faltantes de Carlos Antonio Vélez';
+        alert(filled ? ('Se generaron '+filled+' predicción(es) nueva(s) de Carlos Antonio Vélez.') : 'Ya tenía predicción en todos los partidos.');
       });
     }
 
