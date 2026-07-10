@@ -1,0 +1,90 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return request.auth != null && request.auth.token.admin == true;
+    }
+
+    // Equipos: cualquiera autenticado (aunque sea anónimo) puede leerlos;
+    // solo admin puede crear/editar/borrar.
+    match /profetas/teams/teams/{teamId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Perfiles: cualquiera autenticado puede leerlos (para el login, la
+    // tabla, etc.). Solo se puede crear o editar el perfil propio — el uid
+    // de la sesión (que solo se consigue probando el PIN correcto en
+    // /api/profile-login) tiene que ser igual al id del documento Y al
+    // ownerUid guardado adentro. Admin puede además editar cualquiera
+    // (ej. para el bot) y es el único que puede borrar perfiles.
+    match /profetas/profiles/profiles/{profileId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() ||
+        (isSignedIn() && request.auth.uid == profileId && request.resource.data.ownerUid == profileId);
+      allow update: if isAdmin() ||
+        (isSignedIn() && request.auth.uid == profileId && request.resource.data.ownerUid == profileId);
+      allow delete: if isAdmin();
+    }
+
+    // Hashes de PIN: nadie los lee ni los escribe desde el navegador, ni
+    // siquiera admin. Solo el Admin SDK (usado en las funciones serverless
+    // /api/profile-login, /api/admin-login y /api/migrate-security) puede
+    // tocar esta colección, porque el Admin SDK no pasa por estas reglas.
+    match /profetas/profilePins/{profileId} {
+      allow read, write: if false;
+    }
+
+    // Contador de intentos fallidos de la contraseña de administrador.
+    // Mismo motivo: solo el Admin SDK, nunca el navegador.
+    match /profetas/adminAuth/{document} {
+      allow read, write: if false;
+    }
+
+    // Partidos: cualquiera autenticado los lee; solo admin los crea, edita
+    // (cargar/editar resultado) o borra.
+    match /profetas/matches/matches/{matchId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+
+      // Predicciones: cualquiera autenticado puede leerlas (la app decide
+      // en el cliente si mostrarlas u ocultarlas hasta el kickoff — eso es
+      // una regla de interfaz, no de acceso a datos). Solo se puede crear
+      // o editar la predicción propia (ownerUid == el propio uid), o admin
+      // (necesario para las predicciones del bot "Carlos Antonio Vélez",
+      // cuyo ownerUid nunca es un uid real).
+      match /predictions/{profileId} {
+        allow read: if isSignedIn();
+        allow create, update: if isAdmin() ||
+          (isSignedIn() && request.auth.uid == profileId && request.auth.uid == request.resource.data.ownerUid);
+        allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == profileId);
+      }
+    }
+
+    // Pre-temporada: sigue siendo un único documento (no se pidió pasarlo a
+    // subcolección). Cualquiera autenticado puede editar SOLO su propia
+    // entrada dentro de picks{} — el resto del documento (result, y las
+    // entradas de otras personas) tiene que quedar exactamente igual, cosa
+    // que se verifica comparando qué cambió (diff) contra lo que ya había.
+    // Cerrar/calificar la pre-temporada sigue siendo solo de admin.
+    match /profetas/preseason {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() || isSignedIn();
+      allow update: if isAdmin() ||
+        (isSignedIn() &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['picks']) &&
+         request.resource.data.picks.diff(resource.data.picks).affectedKeys().hasOnly([request.auth.uid]));
+      allow delete: if isAdmin();
+    }
+
+    // Tabla real de la liga: cualquiera autenticado la lee, solo admin la edita.
+    match /profetas/realStandings {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+  }
+}

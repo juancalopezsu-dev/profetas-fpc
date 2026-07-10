@@ -47,29 +47,31 @@ export default async function handler(req, res) {
   try {
     const db = getDb();
 
-    const matchesRef = db.collection('profetas').doc('matches');
-    const matchesSnap = await matchesRef.get();
-    const matchesData = matchesSnap.exists ? matchesSnap.data() : { matches: [], predictions: {} };
-    const matches = matchesData.matches || [];
+    // Los partidos y equipos viven como documentos individuales en
+    // 'profetas/matches/matches/{id}' y 'profetas/teams/teams/{id}'
+    // (no como un array dentro de un único documento).
+    const matchesSnap = await db.collection('profetas').doc('matches').collection('matches').get();
+    const matchDocs = matchesSnap.docs;
 
-    const pending = matches.filter(m =>
-      (m.homeScore === null || m.homeScore === undefined) && m.kickoff
-    );
+    const pendingDocs = matchDocs.filter(d => {
+      const m = d.data();
+      return (m.homeScore === null || m.homeScore === undefined) && m.kickoff;
+    });
 
-    if (!pending.length) {
+    if (!pendingDocs.length) {
       res.status(200).json({ updated: 0, message: 'No hay partidos pendientes con fecha para revisar.' });
       return;
     }
 
-    const teamsSnap = await db.collection('profetas').doc('teams').get();
-    const teams = teamsSnap.exists ? (teamsSnap.data().list || []) : [];
+    const teamsSnap = await db.collection('profetas').doc('teams').collection('teams').get();
+    const teams = teamsSnap.docs.map(d => d.data());
     const teamById = id => teams.find(t => t.id === id);
 
-    const dates = Array.from(new Set(pending.map(m => m.kickoff.slice(0, 10))));
+    const dates = Array.from(new Set(pendingDocs.map(d => d.data().kickoff.slice(0, 10))));
     let updatedCount = 0;
 
     for (const date of dates) {
-      const dayMatches = pending.filter(m => m.kickoff.slice(0, 10) === date);
+      const dayDocs = pendingDocs.filter(d => d.data().kickoff.slice(0, 10) === date);
       const season = new Date(date).getFullYear();
       const url = `https://v3.football.api-sports.io/fixtures?league=${LEAGUE_ID}&season=${season}&date=${date}`;
 
@@ -77,25 +79,21 @@ export default async function handler(req, res) {
       const apiData = await apiRes.json();
       const fixtures = apiData.response || [];
 
-      fixtures.forEach(fx => {
-        if (fx.fixture.status.short !== 'FT') return;
-        dayMatches.forEach(m => {
-          if (m.homeScore !== null && m.homeScore !== undefined) return;
+      for (const fx of fixtures) {
+        if (fx.fixture.status.short !== 'FT') continue;
+        for (const matchDoc of dayDocs) {
+          const m = matchDoc.data();
+          if (m.homeScore !== null && m.homeScore !== undefined) continue;
           const home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-          if (!home || !away) return;
+          if (!home || !away) continue;
           const homeMatches = fx.teams.home.name.toLowerCase().indexOf(home.name.toLowerCase().split(' ')[0]) >= 0;
           const awayMatches = fx.teams.away.name.toLowerCase().indexOf(away.name.toLowerCase().split(' ')[0]) >= 0;
           if (homeMatches && awayMatches) {
-            m.homeScore = fx.goals.home;
-            m.awayScore = fx.goals.away;
+            await matchDoc.ref.update({ homeScore: fx.goals.home, awayScore: fx.goals.away });
             updatedCount++;
           }
-        });
-      });
-    }
-
-    if (updatedCount > 0) {
-      await matchesRef.set({ matches, predictions: matchesData.predictions || {} });
+        }
+      }
     }
 
     res.status(200).json({ updated: updatedCount });

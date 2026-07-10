@@ -1,11 +1,32 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getFirestore, doc, getDoc, setDoc, collection, deleteDoc, writeBatch, onSnapshot
+  getFirestore, doc, getDoc, setDoc, collection, collectionGroup, deleteDoc, writeBatch, onSnapshot
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  getAuth, onAuthStateChanged, signInAnonymously, signInWithCustomToken, signOut
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { firebaseConfig } from "./firebase-config.js";
 
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
+const auth = getAuth(fbApp);
+
+// Todo el mundo (incluso antes de elegir perfil) necesita estar autenticado
+// para poder leer o escribir en Firestore — las reglas exigen request.auth
+// != null. Si ya había una sesión guardada (perfil o admin, vía custom
+// token), Firebase la restaura sola; si no hay ninguna, entramos anónimo.
+function ensureAuth(){
+  return new Promise(function(resolve, reject){
+    var unsub = onAuthStateChanged(auth, function(user){
+      if(user){
+        unsub();
+        resolve(user);
+      } else {
+        signInAnonymously(auth).catch(reject);
+      }
+    }, reject);
+  });
+}
 
 (function(){
   var DEFAULT_TEAMS = [
@@ -38,7 +59,6 @@ const db = getFirestore(fbApp);
     predictions: {},
     preseason: { picks:{}, result:null },
     realStandings: {},
-    adminPassword: null,
     adminUnlocked: false,
     myId: null,
     tab: 'predicciones',
@@ -168,9 +188,39 @@ const db = getFirestore(fbApp);
     }catch(e){ console.error('migrate profiles error', e); }
   }
 
-  function localGet(key){ try{ return localStorage.getItem(key); }catch(e){ return null; } }
-  function localSet(key, val){ try{ localStorage.setItem(key, val); }catch(e){} }
-  function localRemove(key){ try{ localStorage.removeItem(key); }catch(e){} }
+  // Partidos y predicciones: 'profetas/matches/matches/{matchId}' y, dentro de
+  // cada partido, 'predictions/{profileId}'. Cada predicción es su propio
+  // documento con su propio ownerUid, para que las reglas de Firestore puedan
+  // verificar por documento quién puede crearla o editarla (algo imposible si
+  // todas las predicciones vivieran mezcladas en un array o mapa gigante).
+  function matchesCol(){ return collection(db, 'profetas', 'matches', 'matches'); }
+
+  async function saveMatch(match){
+    try{ await setDoc(doc(db, 'profetas', 'matches', 'matches', match.id), match); }
+    catch(e){ console.error('save match error', match.id, e); alert('No se pudo guardar el partido. Revisa tu conexión.'); }
+  }
+  async function deleteMatchDoc(matchId){
+    try{
+      var preds = state.predictions[matchId] || {};
+      var batch = writeBatch(db);
+      Object.keys(preds).forEach(function(pid){
+        batch.delete(doc(db, 'profetas', 'matches', 'matches', matchId, 'predictions', pid));
+      });
+      batch.delete(doc(db, 'profetas', 'matches', 'matches', matchId));
+      await batch.commit();
+    }catch(e){ console.error('delete match error', matchId, e); alert('No se pudo eliminar el partido. Revisa tu conexión.'); }
+  }
+  async function savePrediction(matchId, profileId, pred){
+    try{
+      await setDoc(doc(db, 'profetas', 'matches', 'matches', matchId, 'predictions', profileId), {
+        home: pred.home, away: pred.away, ownerUid: profileId
+      });
+    }catch(e){ console.error('save prediction error', matchId, profileId, e); alert('No se pudo guardar tu predicción. Revisa tu conexión.'); }
+  }
+  async function deletePrediction(matchId, profileId){
+    try{ await deleteDoc(doc(db, 'profetas', 'matches', 'matches', matchId, 'predictions', profileId)); }
+    catch(e){ console.error('delete prediction error', matchId, profileId, e); }
+  }
 
   /* ---------- TIEMPO REAL ---------- */
   // En vez de leer una sola vez con getDoc/getDocs, nos suscribimos con
@@ -213,6 +263,30 @@ const db = getFirestore(fbApp);
     });
   }
 
+  // Igual que watchCollection, pero para una collectionGroup (todas las
+  // subcolecciones 'predictions' de todos los partidos a la vez). Agrupa los
+  // documentos por matchId (el padre de 'predictions' es el propio partido).
+  function watchCollectionGroup(colGroupRef, applyFn, onUpdate){
+    return new Promise(function(resolve){
+      var first = true;
+      var unsub = onSnapshot(colGroupRef, function(snap){
+        var map = {};
+        snap.forEach(function(docSnap){
+          var matchId = docSnap.ref.parent.parent.id;
+          if(!map[matchId]) map[matchId] = {};
+          map[matchId][docSnap.id] = docSnap.data();
+        });
+        applyFn(map);
+        if(first){ first = false; resolve(); }
+        else if(onUpdate){ onUpdate(); }
+      }, function(err){
+        console.error('watchCollectionGroup error', err);
+        if(first){ first = false; resolve(); }
+      });
+      unsubscribers.push(unsub);
+    });
+  }
+
   // Vuelve a pintar la pantalla actual (login o la pestaña activa) con el
   // estado ya actualizado. Si la persona está escribiendo algo en ese
   // momento (un input/select dentro de la vista visible), no interrumpe —
@@ -248,9 +322,12 @@ const db = getFirestore(fbApp);
       state.teams = list;
     }, refreshCurrentView);
 
-    var matchesPromise = watchDoc('matches', function(data){
-      state.matches = (data && data.matches) || [];
-      state.predictions = (data && data.predictions) || {};
+    var matchesPromise = watchCollection(matchesCol(), function(list){
+      state.matches = list;
+    }, refreshCurrentView);
+
+    var predictionsPromise = watchCollectionGroup(collectionGroup(db, 'predictions'), function(map){
+      state.predictions = map;
     }, refreshCurrentView);
 
     var preseasonPromise = watchDoc('preseason', function(data){
@@ -261,11 +338,7 @@ const db = getFirestore(fbApp);
       state.realStandings = (data && data.data) || {};
     }, refreshCurrentView);
 
-    var adminPromise = watchDoc('admin', function(data){
-      state.adminPassword = data ? data.password : null;
-    }, refreshCurrentView);
-
-    await Promise.all([profilesPromise, teamsPromise, matchesPromise, preseasonPromise, realStandingsPromise, adminPromise]);
+    await Promise.all([profilesPromise, teamsPromise, matchesPromise, predictionsPromise, preseasonPromise, realStandingsPromise]);
 
     if(!state.profiles.length){
       var legacyProfilesDoc = await loadDoc('profiles', null);
@@ -275,8 +348,6 @@ const db = getFirestore(fbApp);
         await migrateProfilesToSubcollection(state.profiles);
       }
     }
-    await ensureBotProfile();
-    await fillMissingBotPredictions();
 
     if(!state.teams.length){
       var legacyTeamsDoc = await loadDoc('teams', null);
@@ -287,14 +358,9 @@ const db = getFirestore(fbApp);
       }
       await migrateTeamsToSubcollection(state.teams);
     }
-
-    state.myId = localGet('profetas-my-id');
   }
-  async function saveMatchesAndPredictions(){ await saveDoc('matches', { matches: state.matches, predictions: state.predictions }); }
   async function savePreseason(){ await saveDoc('preseason', state.preseason); }
   async function saveRealStandings(){ await saveDoc('realStandings', { data: state.realStandings }); }
-  async function saveAdminPassword(){ await saveDoc('admin', { password: state.adminPassword }); }
-  function saveMyId(){ localSet('profetas-my-id', state.myId); }
 
   function teamById(id){ return state.teams.find(function(t){return t.id===id;}); }
   function profileById(id){ return state.profiles.find(function(p){return p.id===id;}); }
@@ -304,10 +370,15 @@ const db = getFirestore(fbApp);
   function getBotProfile(){ return state.profiles.find(function(p){ return p.isBot; }); }
   function getBotProfileId(){ var b = getBotProfile(); return b ? b.id : null; }
 
+  // Solo se puede llamar desde una sesión de administrador: crear el perfil
+  // del bot es una escritura de perfil cuyo 'ownerUid' nunca va a coincidir
+  // con el auth.uid de quien la haga (el bot no inicia sesión con PIN), así
+  // que las reglas de Firestore solo la permiten si isAdmin() es cierto.
   async function ensureBotProfile(){
     var bot = getBotProfile();
     if(bot) return bot;
-    bot = { id: uid(), name: BOT_NAME, photo: null, pin: null, isBot: true };
+    var id = uid();
+    bot = { id: id, name: BOT_NAME, photo: null, isBot: true, ownerUid: id };
     state.profiles.push(bot);
     await saveProfile(bot);
     return bot;
@@ -333,23 +404,25 @@ const db = getFirestore(fbApp);
 
   // Rellena con un marcador aleatorio la predicción del bot en cualquier
   // partido que ya exista pero que se haya quedado sin ella (ej. partidos
-  // creados antes de que existiera el bot, o antes de esta función). Se
-  // corre sola al cargar la app y también hay un botón manual en Gestionar.
+  // creados antes de que existiera el bot). Solo admin puede escribir
+  // predicciones del bot (su ownerUid nunca coincide con un auth.uid real),
+  // así que esto se llama solo desde dentro de Gestionar.
   async function fillMissingBotPredictions(){
     var botId = getBotProfileId();
     if(!botId) return 0;
     var filled = 0;
+    var writes = [];
     state.matches.forEach(function(m){
       if(!state.predictions[m.id]) state.predictions[m.id] = {};
       if(!state.predictions[m.id][botId]){
         var score = randomBotScore();
-        state.predictions[m.id][botId] = { home: String(score.home), away: String(score.away) };
+        var pred = { home: String(score.home), away: String(score.away), ownerUid: botId };
+        state.predictions[m.id][botId] = pred;
+        writes.push(savePrediction(m.id, botId, pred));
         filled++;
       }
     });
-    if(filled > 0){
-      await saveMatchesAndPredictions();
-    }
+    if(writes.length){ await Promise.all(writes); }
     return filled;
   }
 
@@ -464,15 +537,25 @@ const db = getFirestore(fbApp);
     el.classList.remove('hidden');
 
     el.querySelectorAll('[data-select-profile]').forEach(function(node){
-      node.addEventListener('click', function(){
+      node.addEventListener('click', async function(){
         var pid = node.getAttribute('data-select-profile');
         var profile = profileById(pid);
         var pin = prompt('Ingresa tu PIN de 4 dígitos para entrar como '+profile.name+':');
         if(pin === null) return;
-        if(pin !== profile.pin){ alert('PIN incorrecto.'); return; }
-        state.myId = pid;
-        saveMyId();
-        showMain();
+        if(!/^\d{4}$/.test(pin)){ alert('El PIN debe ser de 4 dígitos'); return; }
+        try{
+          var resp = await fetch('/api/profile-login', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ mode:'login', profileId:pid, pin:pin })
+          });
+          var data = await resp.json();
+          if(!resp.ok){ alert(data.error || 'PIN incorrecto.'); return; }
+          await signInWithCustomToken(auth, data.token);
+          state.myId = pid;
+          showMain();
+        }catch(e){
+          alert('No se pudo iniciar sesión. Revisa tu conexión.');
+        }
       });
     });
 
@@ -501,12 +584,26 @@ const db = getFirestore(fbApp);
       if(!/^\d{4}$/.test(pin)){ alert('El PIN debe ser de 4 dígitos'); return; }
       btn.disabled = true;
       btn.textContent = 'Creando...';
-      var newP = { id: uid(), name: name, photo: pendingPhoto, pin: pin };
-      state.profiles.push(newP);
-      await saveProfile(newP);
-      state.myId = newP.id;
-      saveMyId();
-      showMain();
+      try{
+        var resp = await fetch('/api/profile-login', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ mode:'create', name:name, pin:pin })
+        });
+        var data = await resp.json();
+        if(!resp.ok){
+          alert(data.error || 'No se pudo crear el perfil.');
+          btn.disabled = false; btn.textContent = 'Crear perfil y entrar';
+          return;
+        }
+        await signInWithCustomToken(auth, data.token);
+        var newP = { id: data.profileId, name: name, photo: pendingPhoto, ownerUid: data.profileId };
+        await saveProfile(newP);
+        state.myId = newP.id;
+        showMain();
+      }catch(e){
+        alert('No se pudo crear el perfil. Revisa tu conexión.');
+        btn.disabled = false; btn.textContent = 'Crear perfil y entrar';
+      }
     });
   }
 
@@ -587,8 +684,9 @@ const db = getFirestore(fbApp);
         btn.disabled = true;
         btn.textContent = 'Guardando...';
         if(!state.predictions[mid]) state.predictions[mid] = {};
-        state.predictions[mid][state.myId] = { home:h, away:a };
-        await saveMatchesAndPredictions();
+        var pred = { home:h, away:a, ownerUid: state.myId };
+        state.predictions[mid][state.myId] = pred;
+        await savePrediction(mid, state.myId, pred);
         renderPredicciones(el);
       });
     });
@@ -1016,74 +1114,89 @@ const db = getFirestore(fbApp);
       var currentPin = document.getElementById('perfil-current-pin').value.trim();
       var newPin = document.getElementById('perfil-new-pin').value.trim();
       if(!name){ alert('Escribe tu nombre'); return; }
-      if(currentPin !== me.pin){
+      if(!/^\d{4}$/.test(currentPin)){
         msgEl.style.color = 'var(--danger)';
-        msgEl.textContent = 'El PIN actual no es correcto.';
+        msgEl.textContent = 'Ingresa tu PIN actual (4 dígitos) para confirmar.';
         return;
       }
       if(newPin && !/^\d{4}$/.test(newPin)){ alert('El nuevo PIN debe ser de 4 dígitos'); return; }
       btn.disabled = true;
       btn.textContent = 'Guardando...';
-      me.name = name;
-      me.photo = pendingPhoto;
-      if(newPin) me.pin = newPin;
-      await saveProfile(me);
-      renderShell();
-      renderPerfil(el);
+      try{
+        var idToken = await auth.currentUser.getIdToken();
+        var resp = await fetch('/api/profile-login', {
+          method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+idToken},
+          body: JSON.stringify({ mode:'changePin', profileId: me.id, currentPin: currentPin, newPin: newPin || null })
+        });
+        var data = await resp.json();
+        if(!resp.ok){
+          msgEl.style.color = 'var(--danger)';
+          msgEl.textContent = data.error || 'El PIN actual no es correcto.';
+          btn.disabled = false; btn.textContent = 'Guardar cambios';
+          return;
+        }
+        me.name = name;
+        me.photo = pendingPhoto;
+        await saveProfile(me);
+        renderShell();
+        renderPerfil(el);
+      }catch(e){
+        alert('No se pudo guardar. Revisa tu conexión.');
+        btn.disabled = false; btn.textContent = 'Guardar cambios';
+      }
     });
 
-    document.getElementById('logout-btn').addEventListener('click', function(){
+    document.getElementById('logout-btn').addEventListener('click', async function(){
       if(!confirm('¿Cerrar sesión? Tendrás que volver a elegir tu perfil y escribir tu PIN para entrar de nuevo.')) return;
-      logout();
+      await logout();
     });
   }
 
   /* ---------- PUERTA DE CONTRASEÑA ---------- */
+  // La contraseña de administrador ya no vive en Firestore (donde cualquiera
+  // con la app abierta podría leerla y falsificarla) — se verifica en
+  // /api/admin-login contra un hash bcrypt guardado como variable de entorno
+  // en Vercel. Si es correcta, el servidor entrega un custom token con el
+  // claim admin:true, que las reglas de Firestore exigen para cualquier
+  // escritura de administrador.
   function renderGestionarGate(el){
-    var isFirstTime = !state.adminPassword;
     var html = '<div class="card" style="max-width:320px;margin:20px auto;text-align:center;">';
-    if(isFirstTime){
-      html += '<div class="section-title">Crea tu contraseña de administrador</div>';
-      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Solo tú deberías conocerla. Se usará para gestionar partidos, equipos y resultados.</div>';
-      html += '<input type="password" id="gate-pass1" placeholder="Nueva contraseña" style="width:100%;margin-bottom:8px;">';
-      html += '<input type="password" id="gate-pass2" placeholder="Repite la contraseña" style="width:100%;margin-bottom:12px;">';
-      html += '<button class="btn btn-gold" id="gate-create-btn" style="width:100%;">Crear contraseña</button>';
-    } else {
-      html += '<div class="section-title">Área de administrador</div>';
-      html += '<input type="password" id="gate-pass" placeholder="Contraseña" style="width:100%;margin-bottom:10px;">';
-      html += '<button class="btn btn-gold" id="gate-enter-btn" style="width:100%;">Entrar</button>';
-      html += '<div id="gate-error" style="color:var(--danger);font-size:12px;margin-top:8px;"></div>';
-    }
+    html += '<div class="section-title">Área de administrador</div>';
+    html += '<input type="password" id="gate-pass" placeholder="Contraseña" style="width:100%;margin-bottom:10px;">';
+    html += '<button class="btn btn-gold" id="gate-enter-btn" style="width:100%;">Entrar</button>';
+    html += '<div id="gate-error" style="color:var(--danger);font-size:12px;margin-top:8px;"></div>';
     html += '</div>';
     el.innerHTML = html;
 
-    if(isFirstTime){
-      document.getElementById('gate-create-btn').addEventListener('click', async function(){
-        var btn = this;
-        var p1 = document.getElementById('gate-pass1').value;
-        var p2 = document.getElementById('gate-pass2').value;
-        if(!p1 || p1.length<4){ alert('Usa al menos 4 caracteres'); return; }
-        if(p1!==p2){ alert('Las contraseñas no coinciden'); return; }
-        btn.disabled = true;
-        btn.textContent = 'Creando...';
-        state.adminPassword = p1;
-        await saveAdminPassword();
+    var tryEnter = async function(){
+      var btn = document.getElementById('gate-enter-btn');
+      var errEl = document.getElementById('gate-error');
+      var p = document.getElementById('gate-pass').value;
+      if(!p) return;
+      errEl.textContent = '';
+      btn.disabled = true;
+      btn.textContent = 'Entrando...';
+      try{
+        var resp = await fetch('/api/admin-login', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ password:p, profileId: state.myId })
+        });
+        var data = await resp.json();
+        if(!resp.ok){
+          errEl.textContent = data.error || 'Contraseña incorrecta';
+          btn.disabled = false; btn.textContent = 'Entrar';
+          return;
+        }
+        await signInWithCustomToken(auth, data.token);
         state.adminUnlocked = true;
         renderGestionar(el);
-      });
-    } else {
-      var tryEnter = async function(){
-        var p = document.getElementById('gate-pass').value;
-        if(p===state.adminPassword){
-          state.adminUnlocked = true;
-          renderGestionar(el);
-        } else {
-          document.getElementById('gate-error').textContent = 'Contraseña incorrecta';
-        }
-      };
-      document.getElementById('gate-enter-btn').addEventListener('click', tryEnter);
-      document.getElementById('gate-pass').addEventListener('keydown', function(e){ if(e.key==='Enter') tryEnter(); });
-    }
+      }catch(e){
+        errEl.textContent = 'No se pudo conectar. Revisa tu conexión.';
+        btn.disabled = false; btn.textContent = 'Entrar';
+      }
+    };
+    document.getElementById('gate-enter-btn').addEventListener('click', tryEnter);
+    document.getElementById('gate-pass').addEventListener('keydown', function(e){ if(e.key==='Enter') tryEnter(); });
   }
 
   /* ---------- RECORDATORIO WHATSAPP ---------- */
@@ -1113,6 +1226,14 @@ const db = getFirestore(fbApp);
 
   /* ---------- GESTIONAR ---------- */
   function renderGestionar(el){
+    // Solo una sesión de administrador puede crear el perfil del bot o
+    // escribir sus predicciones (ver comentarios en ensureBotProfile /
+    // fillMissingBotPredictions) — se dispara aquí, no en loadAll(), para
+    // que nunca lo intente una sesión anónima o de un perfil normal.
+    ensureBotProfile()
+      .then(function(){ return fillMissingBotPredictions(); })
+      .catch(function(e){ console.error('bot setup error', e); });
+
     var html = '';
 
     html += '<div style="display:flex;justify-content:flex-end;margin-bottom:10px;">';
@@ -1196,10 +1317,11 @@ const db = getFirestore(fbApp);
     html += '</div>';
 
     html += '<div class="card">';
-    html += '<div class="section-title">Perfiles y PIN (por si alguien lo olvida)</div>';
+    html += '<div class="section-title">Perfiles</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">El PIN de cada quien se guarda cifrado — ya no se puede ver, pero sí resetear a uno nuevo si alguien lo olvida.</div>';
     var humanProfilesGestionar = state.profiles.filter(function(p){ return !p.isBot; });
     humanProfilesGestionar.forEach(function(p){
-      html += '<div class="admin-profile-row">'+avatarHtml(p,32)+'<div style="flex:1;font-size:13px;">'+p.name+'</div><span class="pin-pill">'+p.pin+'</span><button class="btn btn-danger" data-del-profile="'+p.id+'">Eliminar</button></div>';
+      html += '<div class="admin-profile-row">'+avatarHtml(p,32)+'<div style="flex:1;font-size:13px;">'+p.name+'</div><button class="btn" data-reset-pin="'+p.id+'">Resetear PIN</button><button class="btn btn-danger" data-del-profile="'+p.id+'">Eliminar</button></div>';
     });
     if(!humanProfilesGestionar.length){ html += '<div class="empty" style="padding:14px 0;">Todavía no hay perfiles creados.</div>'; }
     html += '</div>';
@@ -1307,13 +1429,15 @@ const db = getFirestore(fbApp);
       btn.textContent = 'Agregando...';
       var newMatch = { id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoff || null, phase:phase, homeScore:null, awayScore:null };
       state.matches.push(newMatch);
+      await saveMatch(newMatch);
       var botId = getBotProfileId();
       if(botId){
         var botScore = randomBotScore();
+        var botPred = { home: String(botScore.home), away: String(botScore.away), ownerUid: botId };
         if(!state.predictions[newMatch.id]) state.predictions[newMatch.id] = {};
-        state.predictions[newMatch.id][botId] = { home: String(botScore.home), away: String(botScore.away) };
+        state.predictions[newMatch.id][botId] = botPred;
+        await savePrediction(newMatch.id, botId, botPred);
       }
-      await saveMatchesAndPredictions();
       renderGestionar(el);
     });
 
@@ -1360,7 +1484,7 @@ const db = getFirestore(fbApp);
         btn.textContent = 'Guardando...';
         var m = state.matches.find(function(x){return x.id===mid;});
         m.homeScore = parseInt(h); m.awayScore = parseInt(a);
-        await saveMatchesAndPredictions();
+        await saveMatch(m);
         renderGestionar(el);
       });
     });
@@ -1376,7 +1500,7 @@ const db = getFirestore(fbApp);
         btn.textContent = 'Actualizando...';
         var m = state.matches.find(function(x){return x.id===mid;});
         m.homeScore = parseInt(h); m.awayScore = parseInt(a);
-        await saveMatchesAndPredictions();
+        await saveMatch(m);
         renderGestionar(el);
       });
     });
@@ -1387,9 +1511,12 @@ const db = getFirestore(fbApp);
         if(!confirm('¿Eliminar este partido? También se borrarán las predicciones asociadas a él.')) return;
         btn.disabled = true;
         btn.textContent = 'Eliminando...';
+        // deleteMatchDoc necesita leer state.predictions[mid] para borrar
+        // también sus predicciones, así que se llama ANTES de limpiar el
+        // estado local — si no, no sabría cuáles documentos borrar.
+        await deleteMatchDoc(mid);
         state.matches = state.matches.filter(function(m){return m.id!==mid;});
         delete state.predictions[mid];
-        await saveMatchesAndPredictions();
         renderGestionar(el);
       });
     });
@@ -1400,14 +1527,44 @@ const db = getFirestore(fbApp);
         if(!confirm('¿Eliminar este perfil? También se borrarán sus predicciones y su pronóstico de pre-temporada.')) return;
         btn.disabled = true;
         btn.textContent = 'Eliminando...';
-        state.profiles = state.profiles.filter(function(p){return p.id!==pid;});
-        Object.keys(state.predictions).forEach(function(mid){
-          if(state.predictions[mid] && (pid in state.predictions[mid])) delete state.predictions[mid][pid];
+        var matchesWithPred = Object.keys(state.predictions).filter(function(mid){
+          return state.predictions[mid] && (pid in state.predictions[mid]);
         });
         if(state.preseason.picks[pid]) delete state.preseason.picks[pid];
-        await Promise.all([deleteProfileDoc(pid), saveMatchesAndPredictions(), savePreseason()]);
-        if(state.myId === pid){ state.myId = null; saveMyId(); }
+        await Promise.all(
+          [deleteProfileDoc(pid), savePreseason()].concat(
+            matchesWithPred.map(function(mid){ return deletePrediction(mid, pid); })
+          )
+        );
+        state.profiles = state.profiles.filter(function(p){return p.id!==pid;});
+        matchesWithPred.forEach(function(mid){ delete state.predictions[mid][pid]; });
+        if(state.myId === pid){ await logout(); return; }
         renderGestionar(el);
+      });
+    });
+
+    el.querySelectorAll('[data-reset-pin]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var pid = btn.getAttribute('data-reset-pin');
+        var newPin = prompt('Escribe el PIN nuevo de 4 dígitos para esta persona:');
+        if(newPin === null) return;
+        if(!/^\d{4}$/.test(newPin)){ alert('El PIN debe ser de 4 dígitos'); return; }
+        btn.disabled = true;
+        btn.textContent = 'Reseteando...';
+        try{
+          var idToken = await auth.currentUser.getIdToken();
+          var resp = await fetch('/api/profile-login', {
+            method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+idToken},
+            body: JSON.stringify({ mode:'adminReset', profileId:pid, newPin:newPin })
+          });
+          var data = await resp.json();
+          if(!resp.ok){ alert(data.error || 'No se pudo resetear el PIN.'); }
+          else { alert('Listo. Avísale a la persona su nuevo PIN.'); }
+        }catch(e){
+          alert('No se pudo conectar. Revisa tu conexión.');
+        }
+        btn.disabled = false;
+        btn.textContent = 'Resetear PIN';
       });
     });
 
@@ -1594,21 +1751,32 @@ const db = getFirestore(fbApp);
     renderView();
   }
 
-  // Solo cierra la sesión de este navegador (borra el perfil "activo" guardado
-  // en localStorage) — no toca nada en Firestore, todos los datos siguen intactos.
-  function logout(){
+  // Cierra la sesión real de Firebase Auth (perfil o admin) y vuelve a
+  // entrar anónimo, para que la pantalla de login pueda seguir leyendo
+  // Firestore. No toca nada en Firestore — todos los datos siguen intactos,
+  // esto solo cambia qué perfil está "activo" en este navegador.
+  async function logout(){
+    await signOut(auth);
     state.myId = null;
-    localRemove('profetas-my-id');
+    state.adminUnlocked = false;
     state.tab = 'predicciones';
     document.getElementById('main-shell').classList.add('hidden');
+    await ensureAuth();
     renderLogin();
   }
 
   async function boot(){
     try{
+      await ensureAuth();
       await loadAll();
       hideBootLoading();
-      if(state.myId && profileById(state.myId)){
+      // El uid de la sesión actual (perfil o admin) es la fuente de verdad
+      // de quién soy — no un valor guardado a mano en localStorage, que
+      // cualquiera podría editar sin haber probado ningún PIN.
+      var user = auth.currentUser;
+      var myProfile = user ? profileById(user.uid) : null;
+      if(myProfile){
+        state.myId = myProfile.id;
         showMain();
       } else {
         renderLogin();
