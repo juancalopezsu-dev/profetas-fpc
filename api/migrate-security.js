@@ -7,8 +7,8 @@
 //     con ownerUid en cada predicción.
 //  2. Perfiles: a cada perfil que todavía no tenga 'ownerUid' le agrega
 //     ownerUid = su propio id, mueve su PIN (si tiene) a un hash bcrypt en
-//     'profetas/profilePins/{profileId}' (colección a la que el navegador
-//     nunca tiene acceso) y quita el campo 'pin' en texto plano del perfil.
+//     'profetas/profilePins/profilePins/{profileId}' (colección a la que el
+//     navegador nunca tiene acceso) y quita el campo 'pin' en texto plano del perfil.
 //  3. Borra 'profetas/admin', el documento donde vivía la contraseña de
 //     administrador en TEXTO PLANO con el sistema viejo — ya no se usa (la
 //     contraseña ahora se verifica en el servidor contra ADMIN_PASSWORD_HASH)
@@ -111,7 +111,7 @@ async function migrateProfiles(db) {
 
     if (profile.pin) {
       const pinHash = await bcrypt.hash(String(profile.pin), 10);
-      await db.collection('profetas').collection('profilePins').doc(profileDoc.id).set({
+      await db.collection('profetas').doc('profilePins').collection('profilePins').doc(profileDoc.id).set({
         pinHash, failedAttempts: 0, lockedUntil: null
       });
     }

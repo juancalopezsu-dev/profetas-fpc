@@ -35,13 +35,13 @@ service cloud.firestore {
     // siquiera admin. Solo el Admin SDK (usado en las funciones serverless
     // /api/profile-login, /api/admin-login y /api/migrate-security) puede
     // tocar esta colección, porque el Admin SDK no pasa por estas reglas.
-    match /profetas/profilePins/{profileId} {
+    match /profetas/profilePins/profilePins/{profileId} {
       allow read, write: if false;
     }
 
     // Contador de intentos fallidos de la contraseña de administrador.
     // Mismo motivo: solo el Admin SDK, nunca el navegador.
-    match /profetas/adminAuth/{document} {
+    match /profetas/adminAuth/adminAuth/{document} {
       allow read, write: if false;
     }
 

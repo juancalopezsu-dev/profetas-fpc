@@ -5,8 +5,8 @@
 // algo real: las reglas comparan request.auth.uid contra ownerUid, y el único
 // modo de conseguir un token con ese uid es probando el PIN correcto aquí.
 //
-// El PIN se guarda con bcrypt en 'profetas/profilePins/{profileId}', una
-// colección a la que las reglas de Firestore le niegan cualquier acceso desde
+// El PIN se guarda con bcrypt en 'profetas/profilePins/profilePins/{profileId}',
+// una colección a la que las reglas de Firestore le niegan cualquier acceso desde
 // el navegador (allow read, write: if false) — solo el Admin SDK, usado aquí,
 // puede leerla o escribirla. Así, aunque cualquiera pueda leer la lista de
 // perfiles, nadie puede leer ni fuerza-bruta-ear un hash de PIN desde el cliente.
@@ -48,7 +48,7 @@ function getApp() {
 }
 
 async function verifyPinWithLockout(db, profileId, pin) {
-  const pinRef = db.collection('profetas').collection('profilePins').doc(profileId);
+  const pinRef = db.collection('profetas').doc('profilePins').collection('profilePins').doc(profileId);
   const pinSnap = await pinRef.get();
   if (!pinSnap.exists) {
     return { ok: false, error: 'Perfil no encontrado.' };
@@ -98,7 +98,7 @@ export default async function handler(req, res) {
       }
       const profileId = randomUUID();
       const pinHash = await bcrypt.hash(pin, 10);
-      await db.collection('profetas').collection('profilePins').doc(profileId).set({
+      await db.collection('profetas').doc('profilePins').collection('profilePins').doc(profileId).set({
         pinHash, failedAttempts: 0, lockedUntil: null
       });
       const token = await auth.createCustomToken(profileId, {});
@@ -150,7 +150,7 @@ export default async function handler(req, res) {
           return;
         }
         const pinHash = await bcrypt.hash(newPin, 10);
-        await db.collection('profetas').collection('profilePins').doc(profileId).set({ pinHash }, { merge: true });
+        await db.collection('profetas').doc('profilePins').collection('profilePins').doc(profileId).set({ pinHash }, { merge: true });
       }
       res.status(200).json({ ok: true });
       return;
@@ -174,7 +174,7 @@ export default async function handler(req, res) {
         return;
       }
       const pinHash = await bcrypt.hash(newPin, 10);
-      await db.collection('profetas').collection('profilePins').doc(profileId).set({
+      await db.collection('profetas').doc('profilePins').collection('profilePins').doc(profileId).set({
         pinHash, failedAttempts: 0, lockedUntil: null
       }, { merge: true });
       res.status(200).json({ ok: true });

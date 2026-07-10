@@ -12,8 +12,8 @@
 // mismo uid de siempre — solo se le agrega el claim admin:true encima.
 //
 // Protección contra fuerza bruta: bloquea 5 minutos después de 5 intentos
-// fallidos seguidos (se guarda en 'profetas/adminAuth/state', inaccesible
-// desde el navegador).
+// fallidos seguidos (se guarda en 'profetas/adminAuth/adminAuth/state',
+// inaccesible desde el navegador).
 //
 // Variables de entorno necesarias en Vercel:
 //   - FIREBASE_SERVICE_ACCOUNT: JSON del service account de Firebase (como texto)
@@ -59,7 +59,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    const stateRef = db.collection('profetas').collection('adminAuth').doc('state');
+    const stateRef = db.collection('profetas').doc('adminAuth').collection('adminAuth').doc('state');
     const stateSnap = await stateRef.get();
     const stateData = stateSnap.exists ? stateSnap.data() : {};
     const now = Date.now();
