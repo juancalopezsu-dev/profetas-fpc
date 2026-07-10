@@ -18,7 +18,12 @@
 //      se salta esta ejecución — la siguiente ventana de 5 minutos lo reintenta.
 //   5. Si hay cuota, consulta /fixtures por fecha para esos partidos y
 //      actualiza marcador y status ('live' -> 'finished' cuando la API
-//      reporta el partido terminado: FT, AET o PEN).
+//      reporta el partido terminado: FT, AET o PEN). Cada partido usa la
+//      liga de API-Football que le corresponde según su campo 'competition'
+//      ('fpc' = liga 239, temporada según el año de la fecha; 'mundial' =
+//      liga 1, siempre temporada 2026) — ver leagueParamsFor() más abajo.
+//      Las dos competencias comparten el mismo control de cuota del paso 4,
+//      así que no hay un límite aparte por competencia.
 //   6. Para cada partido que sigue en vivo, intenta además /fixtures/events
 //      para sacar la lista de goles (equipo + minuto). Es un intento aparte
 //      y nunca bloquea el marcador: si el plan de API-Football contratado no
@@ -45,9 +50,19 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 
-const LEAGUE_ID = 239; // Liga BetPlay Dimayor / Primera A Colombia
 const MIN_REMAINING_REQUESTS = 15;
 const FINISHED_CODES = ['FT', 'AET', 'PEN'];
+
+// Cada competencia le corresponde una liga distinta en API-Football. La FPC
+// (Colombia Primera A) usa la temporada del año de la fecha del partido,
+// igual que antes; el Mundial 2026 siempre es la misma temporada fija.
+function leagueParamsFor(competition, date) {
+  if (competition === 'mundial') return { id: 1, season: 2026 };
+  return { id: 239, season: new Date(date).getFullYear() };
+}
+function matchCompetition(m) {
+  return m.competition === 'mundial' ? 'mundial' : 'fpc';
+}
 
 // Colombia (Bogotá) no tiene horario de verano, siempre es UTC-5.
 function bogotaDateStr(kickoff) {
@@ -167,14 +182,24 @@ export default async function handler(req, res) {
     const teams = teamsSnap.docs.map(d => d.data());
     const teamById = id => teams.find(t => t.id === id);
 
-    const dates = Array.from(new Set(liveDocs.map(d => bogotaDateStr(d.data().kickoff))));
+    // Se agrupa por competencia + fecha (no solo fecha) porque un mismo día
+    // puede tener partidos de la FPC y del Mundial a la vez, y cada uno
+    // necesita su propia consulta de /fixtures con su propia liga.
+    const groups = {};
+    for (const d of liveDocs) {
+      const competition = matchCompetition(d.data());
+      const date = bogotaDateStr(d.data().kickoff);
+      const key = competition + '|' + date;
+      if (!groups[key]) groups[key] = { competition, date, docs: [] };
+      groups[key].docs.push(d);
+    }
     let updatedCount = 0, finishedCount = 0, goalsUpdated = 0;
 
-    for (const date of dates) {
-      const season = new Date(date).getFullYear();
-      const data = await apiFootball(`/fixtures?league=${LEAGUE_ID}&season=${season}&date=${date}`, apiKey);
+    for (const key of Object.keys(groups)) {
+      const { competition, date, docs: dayDocs } = groups[key];
+      const league = leagueParamsFor(competition, date);
+      const data = await apiFootball(`/fixtures?league=${league.id}&season=${league.season}&date=${date}`, apiKey);
       const fixtures = data.response || [];
-      const dayDocs = liveDocs.filter(d => bogotaDateStr(d.data().kickoff) === date);
 
       for (const matchDoc of dayDocs) {
         const m = matchDoc.data();

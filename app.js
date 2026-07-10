@@ -509,6 +509,14 @@ function ensureAuth(){
     return state.matches.some(function(m){ return matchStatus(m)==='live'; });
   }
 
+  // Competencia de un equipo/partido: 'fpc' (Liga BetPlay, la real) o
+  // 'mundial' (Copa Mundial 2026, datos de prueba para probar que el
+  // rastreo automático también funciona con otra liga de API-Football).
+  // Los equipos/partidos guardados antes de que existiera este campo no lo
+  // tienen — se tratan como 'fpc', que es lo que ya eran.
+  function teamCompetition(t){ return t.competition==='mundial' ? 'mundial' : 'fpc'; }
+  function matchCompetition(m){ return m.competition==='mundial' ? 'mundial' : 'fpc'; }
+
   // Datos por fase: etiqueta, clase CSS del badge y puntos por acertar
   // resultado/marcador exacto. Único lugar donde viven estos números.
   function phaseInfo(phase){
@@ -550,6 +558,7 @@ function ensureAuth(){
     var totals = {};
     state.profiles.forEach(function(p){ totals[p.id] = 0; });
     state.matches.forEach(function(m){
+      if(matchCompetition(m)!=='fpc') return;
       if(m.homeScore===null||m.homeScore===undefined) return;
       state.profiles.forEach(function(p){
         var eff = effectivePrediction(m, p.id);
@@ -792,7 +801,7 @@ function ensureAuth(){
     var kickoffLabel = m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO', {weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}) : ('Fecha '+(m.matchday||'-'));
 
     var html = '<div class="card match-card">';
-    html += '<div class="match-top"><span class="phase-badge '+phaseClass+'">'+phaseLabel+'</span>'+(isLive?'<span class="live-badge"><span class="live-dot"></span>EN VIVO</span>':'')+'<span class="match-meta">'+kickoffLabel+'</span></div>';
+    html += '<div class="match-top"><span class="phase-badge '+phaseClass+'">'+phaseLabel+'</span>'+(matchCompetition(m)==='mundial'?'<span class="phase-badge" style="background:rgba(58,107,139,0.25);color:#7fb3d5;">🌎 Mundial</span>':'')+(isLive?'<span class="live-badge"><span class="live-dot"></span>EN VIVO</span>':'')+'<span class="match-meta">'+kickoffLabel+'</span></div>';
     html += '<div class="match-teams">';
     html += '<div class="team">'+shieldHtml(home)+'<span class="team-name">'+escapeHtml(home?home.name:'?')+'</span></div>';
 
@@ -875,7 +884,7 @@ function ensureAuth(){
         });
       }
     } else {
-      var teamRows = state.teams.map(function(t){
+      var teamRows = state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; }).map(function(t){
         var s = state.realStandings[t.id] || {pj:0,pg:0,pe:0,pp:0,gf:0,gc:0};
         var pts = (s.pg||0)*3 + (s.pe||0);
         var dg = (s.gf||0) - (s.gc||0);
@@ -1068,7 +1077,7 @@ function ensureAuth(){
     html += '<div class="pick-row"><span class="pick-label">Campeón</span>';
     html += '<select id="pick-champion" '+(locked?'disabled':'')+'>';
     html += '<option value="">Selecciona un equipo</option>';
-    state.teams.forEach(function(t){
+    state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; }).forEach(function(t){
       html += '<option value="'+t.id+'"'+(myPick.championTeamId===t.id?' selected':'')+'>'+escapeHtml(t.name)+'</option>';
     });
     html += '</select></div>';
@@ -1345,10 +1354,11 @@ function ensureAuth(){
     html += '<div class="card">';
     html += '<div class="section-title">Agregar partido</div>';
     html += '<div class="form-grid">';
-    html += '<div class="form-row"><label>Local</label><select id="m-home">'+teamOptions()+'</select></div>';
-    html += '<div class="form-row"><label>Visitante</label><select id="m-away">'+teamOptions()+'</select></div>';
-    html += '<div class="form-row"><label>Fecha y hora de inicio</label><input type="datetime-local" id="m-kickoff"></div>';
+    html += '<div class="form-row"><label>Competencia</label><select id="m-competition"><option value="fpc">FPC</option><option value="mundial">Mundial</option></select></div>';
     html += '<div class="form-row"><label>Fase</label><select id="m-phase"><option value="regular">Regular</option><option value="cuadrangulares">Cuadrangulares</option><option value="final">Final</option></select></div>';
+    html += '<div class="form-row"><label>Local</label><select id="m-home">'+teamOptions('fpc')+'</select></div>';
+    html += '<div class="form-row"><label>Visitante</label><select id="m-away">'+teamOptions('fpc')+'</select></div>';
+    html += '<div class="form-row"><label>Fecha y hora de inicio</label><input type="datetime-local" id="m-kickoff"></div>';
     html += '</div>';
     html += '<button class="btn btn-gold" id="add-match-btn">Agregar partido</button>';
     html += '</div>';
@@ -1366,7 +1376,7 @@ function ensureAuth(){
       pending.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
         html += '<div class="team-list-item" style="flex-wrap:wrap;">';
-        html += '<div style="flex:1;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'<div style="font-size:11px;color:var(--muted);">'+(m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO') : 'Sin hora')+' · '+phaseInfo(m.phase).label+'</div></div>';
+        html += '<div style="flex:1;font-size:13px;">'+(matchCompetition(m)==='mundial'?'🌎 ':'')+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'<div style="font-size:11px;color:var(--muted);">'+(m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO') : 'Sin hora')+' · '+phaseInfo(m.phase).label+'</div></div>';
         html += '<input type="number" min="0" style="width:44px;" data-res-home="'+m.id+'">';
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-res-away="'+m.id+'">';
@@ -1388,7 +1398,7 @@ function ensureAuth(){
       liveMatchesGestionar.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
         html += '<div class="team-list-item" style="flex-wrap:wrap;">';
-        html += '<div style="width:100%;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
+        html += '<div style="width:100%;font-size:13px;">'+(matchCompetition(m)==='mundial'?'🌎 ':'')+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
         html += '<input type="number" min="0" style="width:44px;" data-live-home="'+m.id+'" value="'+(m.homeScore==null?0:m.homeScore)+'">';
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-live-away="'+m.id+'" value="'+(m.awayScore==null?0:m.awayScore)+'">';
@@ -1418,7 +1428,7 @@ function ensureAuth(){
       finishedMatches.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
         html += '<div class="team-list-item">';
-        html += '<div style="flex:1;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
+        html += '<div style="flex:1;font-size:13px;">'+(matchCompetition(m)==='mundial'?'🌎 ':'')+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
         html += '<input type="number" min="0" style="width:44px;" data-edit-home="'+m.id+'" value="'+m.homeScore+'">';
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-edit-away="'+m.id+'" value="'+m.awayScore+'">';
@@ -1430,20 +1440,49 @@ function ensureAuth(){
     }
 
     html += '<div class="card">';
-    html += '<div class="section-title">Equipos</div>';
-    state.teams.forEach(function(t){
+    html += '<div class="section-title">Equipos FPC</div>';
+    var fpcTeamsGestionar = state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; });
+    if(!fpcTeamsGestionar.length){ html += '<div class="empty" style="padding:10px 0;">Todavía no hay equipos de la FPC.</div>'; }
+    fpcTeamsGestionar.forEach(function(t){
       html += '<div class="team-list-item" style="flex-wrap:wrap;">';
       html += '<div style="width:100%;display:flex;align-items:center;gap:8px;">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+escapeHtml(t.name)+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
       html += '<div style="width:100%;margin-top:6px;"><label class="btn" style="display:inline-block;cursor:pointer;"><span data-logo-label="'+t.id+'">Subir escudo</span><input type="file" accept="image/*" data-logo-file="'+t.id+'" style="display:none;"></label></div>';
       html += '</div>';
     });
-    html += '<div class="form-grid" style="margin-top:12px;">';
+    html += '</div>';
+
+    var mundialTeamsGestionar = state.teams.filter(function(t){ return teamCompetition(t)==='mundial'; });
+    if(mundialTeamsGestionar.length){
+      html += '<div class="card">';
+      html += '<div class="section-title">🌎 Equipos Mundial</div>';
+      mundialTeamsGestionar.forEach(function(t){
+        html += '<div class="team-list-item" style="flex-wrap:wrap;">';
+        html += '<div style="width:100%;display:flex;align-items:center;gap:8px;">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+escapeHtml(t.name)+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
+        html += '<div style="width:100%;margin-top:6px;"><label class="btn" style="display:inline-block;cursor:pointer;"><span data-logo-label="'+t.id+'">Subir escudo</span><input type="file" accept="image/*" data-logo-file="'+t.id+'" style="display:none;"></label></div>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+
+    html += '<div class="card">';
+    html += '<div class="section-title">Agregar equipo</div>';
+    html += '<div class="form-grid">';
+    html += '<div class="form-row"><label>Competencia</label><select id="t-competition"><option value="fpc">FPC</option><option value="mundial">Mundial</option></select></div>';
     html += '<div class="form-row"><label>Nombre</label><input type="text" id="t-name" placeholder="Nombre del equipo"></div>';
     html += '<div class="form-row"><label>Código (3-4 letras)</label><input type="text" id="t-code" maxlength="4" placeholder="EQU"></div>';
     html += '<div class="form-row"><label>Color</label><input type="color" id="t-color" value="#E8592B" style="height:36px;padding:2px;"></div>';
     html += '</div>';
     html += '<button class="btn btn-gold" id="add-team-btn">Agregar equipo</button>';
     html += '</div>';
+
+    var mundialMatchesGestionar = state.matches.filter(function(m){ return matchCompetition(m)==='mundial'; });
+    if(mundialTeamsGestionar.length || mundialMatchesGestionar.length){
+      html += '<div class="card">';
+      html += '<div class="section-title">🌎 Zona de pruebas — Mundial</div>';
+      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Borra de una vez '+mundialMatchesGestionar.length+' partido(s) (con sus predicciones) y '+mundialTeamsGestionar.length+' equipo(s) marcados como Mundial — para cuando termines de probar que el rastreo automático funciona con esa competencia.</div>';
+      html += '<button class="btn btn-danger" id="del-mundial-test-data-btn">Borrar datos de prueba del Mundial</button>';
+      html += '</div>';
+    }
 
     html += '<div class="card">';
     html += '<div class="section-title">Perfiles</div>';
@@ -1470,7 +1509,7 @@ function ensureAuth(){
       var botPick = state.preseason.picks[bot.id] || {championTeamId:'', scorerName:''};
       html += '<div class="form-row"><label>Campeón (pronóstico del bot)</label><select id="bot-champion">';
       html += '<option value="">Selecciona un equipo</option>';
-      state.teams.forEach(function(t){
+      state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; }).forEach(function(t){
         html += '<option value="'+t.id+'"'+(botPick.championTeamId===t.id?' selected':'')+'>'+escapeHtml(t.name)+'</option>';
       });
       html += '</select></div>';
@@ -1482,7 +1521,7 @@ function ensureAuth(){
     html += '<div class="card">';
     html += '<div class="section-title">Tabla real de la liga</div>';
     html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Actualiza esto manualmente después de cada fecha con los datos oficiales.</div>';
-    state.teams.forEach(function(t){
+    state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; }).forEach(function(t){
       var s = state.realStandings[t.id] || {pj:0,pg:0,pe:0,pp:0,gf:0,gc:0};
       html += '<div class="team-list-item" style="flex-wrap:wrap;">';
       html += '<div style="width:100%;display:flex;align-items:center;gap:8px;margin-bottom:6px;">'+shieldHtml(t,26)+'<span style="font-size:13px;">'+escapeHtml(t.name)+'</span></div>';
@@ -1508,7 +1547,7 @@ function ensureAuth(){
       html += '<button class="btn btn-gold" id="lock-picks-btn">Cerrar predicciones de pre-temporada</button>';
     } else {
       html += '<div class="locked-note">Las predicciones ya están bloqueadas. Cuando sepas el resultado real, califica aquí.</div>';
-      html += '<div class="form-row" style="margin-top:10px;"><label>Campeón real</label><select id="ps-champion">'+teamOptions()+'</select></div>';
+      html += '<div class="form-row" style="margin-top:10px;"><label>Campeón real</label><select id="ps-champion">'+teamOptions('fpc')+'</select></div>';
       html += '<div class="form-row"><label>Goleador real (solo informativo — no califica automático)</label><input type="text" id="ps-scorer" placeholder="Nombre del jugador"></div>';
       html += '<div class="section-title" style="margin-top:14px;">¿Quién acertó el goleador?</div>';
       html += '<div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Marca a cada persona cuyo goleador fue el correcto — puede haber más de una si lo escribieron distinto pero es la misma persona.</div>';
@@ -1547,8 +1586,17 @@ function ensureAuth(){
       }).catch(function(){ alert('No se pudo copiar. Selecciona el texto manualmente.'); });
     });
 
+    // Los equipos de Local/Visitante dependen de qué competencia se elija —
+    // un partido del Mundial no puede armarse con equipos de la FPC.
+    document.getElementById('m-competition').addEventListener('change', function(){
+      var competition = this.value;
+      document.getElementById('m-home').innerHTML = teamOptions(competition);
+      document.getElementById('m-away').innerHTML = teamOptions(competition);
+    });
+
     document.getElementById('add-match-btn').addEventListener('click', async function(){
       var btn = this;
+      var competition = document.getElementById('m-competition').value;
       var home = document.getElementById('m-home').value;
       var away = document.getElementById('m-away').value;
       var kickoff = document.getElementById('m-kickoff').value;
@@ -1560,7 +1608,7 @@ function ensureAuth(){
       // reglas de Firestore puedan comparar "¿ya pasó la hora?" al decidir
       // si las predicciones ajenas de este partido ya se pueden leer.
       var kickoffMs = kickoff ? new Date(kickoff).getTime() : null;
-      var newMatch = { id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoffMs, phase:phase, homeScore:null, awayScore:null, status:'scheduled', goals:[] };
+      var newMatch = { id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoffMs, phase:phase, homeScore:null, awayScore:null, status:'scheduled', goals:[], competition:competition };
       state.matches.push(newMatch);
       await saveMatch(newMatch);
       var botId = getBotProfileId();
@@ -1857,13 +1905,14 @@ function ensureAuth(){
 
     document.getElementById('add-team-btn').addEventListener('click', async function(){
       var btn = this;
+      var competition = document.getElementById('t-competition').value;
       var name = document.getElementById('t-name').value.trim();
       var code = document.getElementById('t-code').value.trim().toUpperCase();
       var color = document.getElementById('t-color').value;
       if(!name || !code){ alert('Completa nombre y código'); return; }
       btn.disabled = true;
       btn.textContent = 'Agregando...';
-      var newTeam = { id:uid(), name:name, code:code, color:color };
+      var newTeam = { id:uid(), name:name, code:code, color:color, competition:competition };
       state.teams.push(newTeam);
       await saveTeam(newTeam);
       renderGestionar(el);
@@ -1881,13 +1930,37 @@ function ensureAuth(){
       });
     });
 
+    var delMundialBtn = document.getElementById('del-mundial-test-data-btn');
+    if(delMundialBtn){
+      delMundialBtn.addEventListener('click', async function(){
+        var btn = this;
+        var mundialMatchIds = state.matches.filter(function(m){ return matchCompetition(m)==='mundial'; }).map(function(m){ return m.id; });
+        var mundialTeamIds = state.teams.filter(function(t){ return teamCompetition(t)==='mundial'; }).map(function(t){ return t.id; });
+        if(!confirm('¿Borrar '+mundialMatchIds.length+' partido(s) (con sus predicciones) y '+mundialTeamIds.length+' equipo(s) del Mundial? Esta acción no se puede deshacer.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Borrando...';
+        // deleteMatchDoc necesita leer state.predictions[matchId] para saber
+        // qué predicciones borrar, así que corre ANTES de limpiar el estado local.
+        for(var i=0;i<mundialMatchIds.length;i++){
+          await deleteMatchDoc(mundialMatchIds[i]);
+          delete state.predictions[mundialMatchIds[i]];
+        }
+        state.matches = state.matches.filter(function(m){ return matchCompetition(m)!=='mundial'; });
+        for(var j=0;j<mundialTeamIds.length;j++){
+          await deleteTeamDoc(mundialTeamIds[j]);
+        }
+        state.teams = state.teams.filter(function(t){ return teamCompetition(t)!=='mundial'; });
+        renderGestionar(el);
+      });
+    }
+
     var saveRealBtn = document.getElementById('save-real-standings');
     if(saveRealBtn){
       saveRealBtn.addEventListener('click', async function(){
         var btn = this;
         btn.disabled = true;
         btn.textContent = 'Guardando...';
-        state.teams.forEach(function(t){
+        state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; }).forEach(function(t){
           var row = state.realStandings[t.id] || {};
           ['pj','pg','pe','pp','gf','gc'].forEach(function(field){
             var input = el.querySelector('[data-real="'+t.id+'"][data-field="'+field+'"]');
@@ -1946,8 +2019,9 @@ function ensureAuth(){
     }
   }
 
-  function teamOptions(){
-    return '<option value="">Selecciona</option>' + state.teams.map(function(t){
+  function teamOptions(competition){
+    var teams = competition ? state.teams.filter(function(t){ return teamCompetition(t)===competition; }) : state.teams;
+    return '<option value="">Selecciona</option>' + teams.map(function(t){
       return '<option value="'+t.id+'">'+escapeHtml(t.name)+'</option>';
     }).join('');
   }
