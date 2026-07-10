@@ -66,6 +66,26 @@ function ensureAuth(){
   };
 
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
+
+  // Todo el HTML de esta app se arma pegando texto (no hay un framework con
+  // auto-escape) — así que cualquier texto que alguien más controla (su
+  // nombre de perfil, el goleador que escribió, el color/código de un
+  // equipo, etc.) tiene que pasar por aquí antes de meterse en un innerHTML.
+  // Si no, alguien podría poner como "nombre" algo como
+  // '<img src=x onerror="...">' y ese código se ejecutaría en el navegador
+  // de cualquiera que vea ese nombre — incluido un admin, lo que le daría
+  // control de su sesión. Las reglas de Firestore no protegen contra esto:
+  // permiten guardar cualquier texto en un campo que sea tuyo, es la propia
+  // interfaz la que tiene que tratarlo como texto y no como HTML.
+  function escapeHtml(s){
+    if(s === null || s === undefined) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
   function randomPin(){ return String(Math.floor(1000 + Math.random()*9000)); }
 
   // Colombia (Bogotá) no tiene horario de verano, siempre es UTC-5. Esta
@@ -440,17 +460,17 @@ function ensureAuth(){
     size = size || 44;
     if(!team) return '<div class="shield" style="background:#444;width:'+size+'px;height:'+size+'px;">?</div>';
     if(team.logoUrl){
-      return '<img class="shield" src="'+team.logoUrl+'" alt="'+team.name+'" style="width:'+size+'px;height:'+size+'px;">';
+      return '<img class="shield" src="'+escapeHtml(team.logoUrl)+'" alt="'+escapeHtml(team.name)+'" style="width:'+size+'px;height:'+size+'px;">';
     }
-    return '<div class="shield" style="background:'+team.color+';width:'+size+'px;height:'+size+'px;font-size:'+(size*0.32)+'px;">'+team.code+'</div>';
+    return '<div class="shield" style="background:'+escapeHtml(team.color)+';width:'+size+'px;height:'+size+'px;font-size:'+(size*0.32)+'px;">'+escapeHtml(team.code)+'</div>';
   }
 
   function avatarHtml(profile, size){
     size = size || 34;
     if(profile && profile.photo){
-      return '<img class="avatar" src="'+profile.photo+'" style="width:'+size+'px;height:'+size+'px;">';
+      return '<img class="avatar" src="'+escapeHtml(profile.photo)+'" style="width:'+size+'px;height:'+size+'px;">';
     }
-    var initials = profile ? profile.name.slice(0,2).toUpperCase() : '?';
+    var initials = profile ? escapeHtml(profile.name.slice(0,2).toUpperCase()) : '?';
     return '<div class="avatar-fallback" style="width:'+size+'px;height:'+size+'px;">'+initials+'</div>';
   }
 
@@ -533,7 +553,7 @@ function ensureAuth(){
     if(humanProfiles.length){
       html += '<div class="profile-grid">';
       humanProfiles.forEach(function(p){
-        html += '<div class="profile-tile" data-select-profile="'+p.id+'">'+avatarHtml(p,56)+'<div class="profile-tile-name">'+p.name+'</div></div>';
+        html += '<div class="profile-tile" data-select-profile="'+p.id+'">'+avatarHtml(p,56)+'<div class="profile-tile-name">'+escapeHtml(p.name)+'</div></div>';
       });
       html += '</div>';
     }
@@ -629,7 +649,7 @@ function ensureAuth(){
 
   function renderShell(){
     var me = profileById(state.myId);
-    document.getElementById('me-box').innerHTML = avatarHtml(me,34) + '<span class="me-name">'+(me?me.name:'')+'</span>';
+    document.getElementById('me-box').innerHTML = avatarHtml(me,34) + '<span class="me-name">'+escapeHtml(me?me.name:'')+'</span>';
     var tabsEl = document.getElementById('tabs');
     tabsEl.innerHTML = TABS.map(function(t){
       return '<button class="tab'+(state.tab===t.id?' active':'')+'" data-tab="'+t.id+'">'+t.label+'</button>';
@@ -718,13 +738,13 @@ function ensureAuth(){
     var html = '<div class="card match-card">';
     html += '<div class="match-top"><span class="phase-badge '+phaseClass+'">'+phaseLabel+'</span><span class="match-meta">'+kickoffLabel+'</span></div>';
     html += '<div class="match-teams">';
-    html += '<div class="team">'+shieldHtml(home)+'<span class="team-name">'+(home?home.name:'?')+'</span></div>';
+    html += '<div class="team">'+shieldHtml(home)+'<span class="team-name">'+escapeHtml(home?home.name:'?')+'</span></div>';
 
     if(editable){
       html += '<div class="score-inputs">';
-      html += '<input type="number" min="0" data-pred-home="'+m.id+'" value="'+myPred.home+'">';
+      html += '<input type="number" min="0" data-pred-home="'+m.id+'" value="'+escapeHtml(myPred.home)+'">';
       html += '<span class="vs-label">–</span>';
-      html += '<input type="number" min="0" data-pred-away="'+m.id+'" value="'+myPred.away+'">';
+      html += '<input type="number" min="0" data-pred-away="'+m.id+'" value="'+escapeHtml(myPred.away)+'">';
       html += '</div>';
     } else if(waitingResult){
       html += '<div class="score-inputs"><span class="vs-label">vs</span></div>';
@@ -732,7 +752,7 @@ function ensureAuth(){
       html += '<div class="score-inputs"><span class="result-final">'+m.homeScore+'</span><span class="vs-label">–</span><span class="result-final">'+m.awayScore+'</span></div>';
     }
 
-    html += '<div class="team">'+shieldHtml(away)+'<span class="team-name">'+(away?away.name:'?')+'</span></div>';
+    html += '<div class="team">'+shieldHtml(away)+'<span class="team-name">'+escapeHtml(away?away.name:'?')+'</span></div>';
     html += '</div>';
 
     if(editable){
@@ -741,7 +761,7 @@ function ensureAuth(){
       var effW = effectivePrediction(m, state.myId);
       html += '<div class="match-actions"><span class="locked-tag">Predicción cerrada</span>';
       if(effW){
-        var labelW = effW.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+effW.pred.home+'-'+effW.pred.away) : ('Tu predicción: '+effW.pred.home+'-'+effW.pred.away);
+        var labelW = effW.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+escapeHtml(effW.pred.home)+'-'+escapeHtml(effW.pred.away)) : ('Tu predicción: '+escapeHtml(effW.pred.home)+'-'+escapeHtml(effW.pred.away));
         html += '<span class="points-pill">'+labelW+'</span>';
       }
       html += '<button class="btn" data-show-match-preds="'+m.id+'">Ver predicciones</button>';
@@ -751,7 +771,7 @@ function ensureAuth(){
       var pts = eff ? pointsForPrediction(m, eff.pred) : null;
       html += '<div class="match-actions">';
       if(eff){
-        var label = eff.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+eff.pred.home+'-'+eff.pred.away) : ('Tu predicción '+eff.pred.home+'-'+eff.pred.away);
+        var label = eff.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+escapeHtml(eff.pred.home)+'-'+escapeHtml(eff.pred.away)) : ('Tu predicción '+escapeHtml(eff.pred.home)+'-'+escapeHtml(eff.pred.away));
         html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+label+' · '+pts+' pts</span>';
       } else {
         html += '<span class="points-pill zero">No predijiste este partido</span>';
@@ -787,8 +807,8 @@ function ensureAuth(){
           html += '<div class="board-row'+(i===0?' top1':'')+'" data-profile-detail="'+r.profile.id+'" style="cursor:pointer;">';
           html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
           html += avatarHtml(r.profile, 38);
-          html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+r.profile.name+'</div>';
-          html += '<div style="width:52px;text-align:center;font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+(scorerName?scorerName.replace(/"/g,'&quot;'):'')+'">'+(scorerName || '-')+'</div>';
+          html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+escapeHtml(r.profile.name)+'</div>';
+          html += '<div style="width:52px;text-align:center;font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+escapeHtml(scorerName)+'">'+(scorerName ? escapeHtml(scorerName) : '-')+'</div>';
           html += '<div style="width:28px;display:flex;justify-content:center;">'+(champT ? shieldHtml(champT,24) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
           html += '<div style="width:60px;"><div class="board-points">'+r.points+'</div><span class="board-points-label">Puntos</span></div>';
           html += '</div>';
@@ -813,7 +833,7 @@ function ensureAuth(){
           html += '<div class="board-row">';
           html += '<div class="rank '+rankClass+'" style="font-size:14px;">'+(i+1)+'</div>';
           html += shieldHtml(r.team, 30);
-          html += '<div class="board-name" style="font-size:13px;">'+r.team.name+'</div>';
+          html += '<div class="board-name" style="font-size:13px;">'+escapeHtml(r.team.name)+'</div>';
           html += '<span class="tabular" style="width:28px;text-align:center;font-size:13px;">'+(r.s.pj||0)+'</span>';
           html += '<span class="tabular" style="width:34px;text-align:center;font-size:13px;">'+(r.dg>0?'+':'')+r.dg+'</span>';
           html += '<span class="tabular" style="width:34px;text-align:center;font-size:15px;color:var(--gold);">'+r.pts+'</span>';
@@ -850,7 +870,7 @@ function ensureAuth(){
 
     var html = '<div class="modal-overlay" id="profile-detail-modal">';
     html += '<div class="modal-box">';
-    html += '<div class="modal-header">'+avatarHtml(profile,40)+'<div class="modal-title">'+profile.name+'</div><button class="btn" id="close-profile-detail">Cerrar</button></div>';
+    html += '<div class="modal-header">'+avatarHtml(profile,40)+'<div class="modal-title">'+escapeHtml(profile.name)+'</div><button class="btn" id="close-profile-detail">Cerrar</button></div>';
 
     html += '<div class="section-title" style="margin-top:14px;">Predicciones de partidos</div>';
     if(!predictedMatches.length){
@@ -863,7 +883,7 @@ function ensureAuth(){
         // las propias sí se muestran siempre, ya que uno ya sabe qué predijo.
         var showScore = isLocked(m) || profileId === state.myId;
         html += '<div class="team-list-item" style="flex-wrap:wrap;">';
-        html += '<div style="width:100%;font-size:13px;">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'</div>';
+        html += '<div style="width:100%;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
         html += '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-top:4px;">';
         if(!showScore){
           html += '<span>🔒 Oculto hasta que inicie el partido</span>';
@@ -873,7 +893,7 @@ function ensureAuth(){
           var hasResult = !(m.homeScore===null || m.homeScore===undefined);
           var pts = hasResult ? pointsForPrediction(m, pred) : null;
           var predLabel = eff.auto ? '🤖 Predicción automática (Carlos Antonio Vélez)' : 'Predijo';
-          html += '<span>'+predLabel+': <b style="color:var(--white);">'+pred.home+'-'+pred.away+'</b></span>';
+          html += '<span>'+predLabel+': <b style="color:var(--white);">'+escapeHtml(pred.home)+'-'+escapeHtml(pred.away)+'</b></span>';
           if(hasResult){
             html += '<span>Real: <b style="color:var(--white);">'+m.homeScore+'-'+m.awayScore+'</b></span>';
             html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+pts+' pts</span>';
@@ -891,13 +911,13 @@ function ensureAuth(){
       var champT = teamById(pick.championTeamId);
       var res = state.preseason.result;
       html += '<div class="card" style="margin-bottom:0;">';
-      html += '<div style="font-size:13px;">Campeón: <b>'+(champT?champT.name:'-')+'</b>';
+      html += '<div style="font-size:13px;">Campeón: <b>'+escapeHtml(champT?champT.name:'-')+'</b>';
       if(res && res.locked){
         var champOk = res.championTeamId && pick.championTeamId===res.championTeamId;
         html += champOk ? ' <span class="points-pill">✔ +12 pts</span>' : ' <span class="points-pill zero">✘</span>';
       }
       html += '</div>';
-      html += '<div style="font-size:13px;margin-top:6px;">Goleador: <b>'+(pick.scorerName||'-')+'</b>';
+      html += '<div style="font-size:13px;margin-top:6px;">Goleador: <b>'+escapeHtml(pick.scorerName||'-')+'</b>';
       if(res && res.locked){
         var scorerOk = (res.scorerCorrectIds||[]).indexOf(profileId)>=0;
         html += scorerOk ? ' <span class="points-pill">✔ +12 pts</span>' : ' <span class="points-pill zero">✘</span>';
@@ -937,7 +957,7 @@ function ensureAuth(){
 
     var html = '<div class="modal-overlay" id="match-predictions-modal">';
     html += '<div class="modal-box">';
-    html += '<div class="modal-header"><div class="modal-title">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'</div><button class="btn" id="close-match-predictions">Cerrar</button></div>';
+    html += '<div class="modal-header"><div class="modal-title">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div><button class="btn" id="close-match-predictions">Cerrar</button></div>';
     if(hasResult){
       html += '<div style="text-align:center;font-family:\'Oswald\',sans-serif;font-size:24px;font-weight:700;margin:10px 0;color:var(--gold);">'+match.homeScore+' - '+match.awayScore+'</div>';
     } else {
@@ -949,12 +969,12 @@ function ensureAuth(){
       var eff = effectivePrediction(match, p.id);
       html += '<div class="team-list-item">';
       html += avatarHtml(p, 30);
-      html += '<div style="flex:1;font-size:13px;">'+p.name;
+      html += '<div style="flex:1;font-size:13px;">'+escapeHtml(p.name);
       if(eff && eff.auto){ html += '<div style="font-size:10px;color:var(--muted);">🤖 Predicción automática (Carlos Antonio Vélez)</div>'; }
       html += '</div>';
       if(eff){
         var cls = hasResult ? predictionPillClass(match, eff.pred) : 'pill-neutral';
-        html += '<span class="pred-pill '+cls+'">'+eff.pred.home+'-'+eff.pred.away+'</span>';
+        html += '<span class="pred-pill '+cls+'">'+escapeHtml(eff.pred.home)+'-'+escapeHtml(eff.pred.away)+'</span>';
       } else {
         html += '<span class="pred-pill pill-neutral">No predijo</span>';
       }
@@ -984,11 +1004,11 @@ function ensureAuth(){
     html += '<select id="pick-champion" '+(locked?'disabled':'')+'>';
     html += '<option value="">Selecciona un equipo</option>';
     state.teams.forEach(function(t){
-      html += '<option value="'+t.id+'"'+(myPick.championTeamId===t.id?' selected':'')+'>'+t.name+'</option>';
+      html += '<option value="'+t.id+'"'+(myPick.championTeamId===t.id?' selected':'')+'>'+escapeHtml(t.name)+'</option>';
     });
     html += '</select></div>';
     html += '<div class="pick-row"><span class="pick-label">Goleador</span>';
-    html += '<input type="text" id="pick-scorer" placeholder="Nombre del jugador" value="'+(myPick.scorerName||'').replace(/"/g,'&quot;')+'" '+(locked?'disabled':'')+'>';
+    html += '<input type="text" id="pick-scorer" placeholder="Nombre del jugador" value="'+escapeHtml(myPick.scorerName||'')+'" '+(locked?'disabled':'')+'>';
     html += '</div>';
     if(!locked){
       html += '<button class="btn btn-gold" id="save-preseason">Guardar pronóstico (12 pts c/u si aciertas)</button>';
@@ -1000,8 +1020,8 @@ function ensureAuth(){
     if(state.preseason.result && state.preseason.result.locked){
       var champ = teamById(state.preseason.result.championTeamId);
       html += '<div class="card"><div class="section-title">Resultado real</div>';
-      html += '<div style="font-size:14px;">Campeón: <b>'+(champ?champ.name:'-')+'</b></div>';
-      html += '<div style="font-size:14px;margin-top:4px;">Goleador: <b>'+(state.preseason.result.scorerName||'-')+'</b></div></div>';
+      html += '<div style="font-size:14px;">Campeón: <b>'+escapeHtml(champ?champ.name:'-')+'</b></div>';
+      html += '<div style="font-size:14px;margin-top:4px;">Goleador: <b>'+escapeHtml(state.preseason.result.scorerName||'-')+'</b></div></div>';
     }
 
     html += '<div class="section-title" style="margin-top:22px;">Pronósticos de todos</div>';
@@ -1013,7 +1033,7 @@ function ensureAuth(){
         var p = profileById(pid); if(!p) return;
         var pick = state.preseason.picks[pid];
         var champT = teamById(pick.championTeamId);
-        html += '<div class="board-row">'+avatarHtml(p,34)+'<div class="board-name">'+p.name+'<div style="font-size:11px;color:var(--muted);">'+(champT?champT.name:'-')+' · '+(pick.scorerName||'-')+'</div></div></div>';
+        html += '<div class="board-row">'+avatarHtml(p,34)+'<div class="board-name">'+escapeHtml(p.name)+'<div style="font-size:11px;color:var(--muted);">'+escapeHtml(champT?champT.name:'-')+' · '+escapeHtml(pick.scorerName||'-')+'</div></div></div>';
       });
     }
 
@@ -1078,7 +1098,7 @@ function ensureAuth(){
     html += '<div id="perfil-photo-preview"></div>';
     html += '<label class="btn" style="cursor:pointer;"><span id="perfil-photo-btn-label">Cambiar foto</span><input type="file" accept="image/*" id="perfil-photo-file" style="display:none;"></label>';
     html += '</div>';
-    html += '<div class="form-row"><label>Nombre</label><input type="text" id="perfil-name" value="'+me.name.replace(/"/g,'&quot;')+'"></div>';
+    html += '<div class="form-row"><label>Nombre</label><input type="text" id="perfil-name" value="'+escapeHtml(me.name)+'"></div>';
     html += '<div class="form-row"><label>PIN actual (para confirmar los cambios)</label><input type="text" id="perfil-current-pin" class="pin-input" maxlength="4" inputmode="numeric" placeholder="PIN actual"></div>';
     html += '<div class="form-row"><label>Nuevo PIN (déjalo vacío si no lo quieres cambiar)</label><input type="text" id="perfil-new-pin" class="pin-input" maxlength="4" inputmode="numeric" placeholder="Nuevo PIN de 4 dígitos"></div>';
     html += '<button class="btn btn-gold" id="save-perfil-btn" style="width:100%;margin-top:8px;">Guardar cambios</button>';
@@ -1096,7 +1116,7 @@ function ensureAuth(){
       if(pendingPhoto){
         previewEl.innerHTML = '<img class="avatar" src="'+pendingPhoto+'" style="width:64px;height:64px;">';
       } else {
-        previewEl.innerHTML = '<div class="avatar-fallback" style="width:64px;height:64px;">'+me.name.slice(0,2).toUpperCase()+'</div>';
+        previewEl.innerHTML = '<div class="avatar-fallback" style="width:64px;height:64px;">'+escapeHtml(me.name.slice(0,2).toUpperCase())+'</div>';
       }
     }
     renderPhotoPreview();
@@ -1223,10 +1243,10 @@ function ensureAuth(){
     });
     var kickoffLabel = next.kickoff ? new Date(next.kickoff).toLocaleString('es-CO', {weekday:'long', day:'numeric', month:'long', hour:'2-digit', minute:'2-digit'}) : 'Próximamente';
     var txt = '⚽ Recordatorio Los Profetas del FPC\n';
-    txt += (home?home.name:'?') + ' vs ' + (away?away.name:'?') + ' - ' + kickoffLabel + '\n\n';
+    txt += escapeHtml(home?home.name:'?') + ' vs ' + escapeHtml(away?away.name:'?') + ' - ' + escapeHtml(kickoffLabel) + '\n\n';
     if(missing.length){
       txt += 'Faltan por predecir:\n';
-      missing.forEach(function(p){ txt += '- '+p.name+'\n'; });
+      missing.forEach(function(p){ txt += '- '+escapeHtml(p.name)+'\n'; });
       txt += '\n¡No se queden sin puntos! 🔮';
     } else {
       txt += '¡Todos ya predijeron este partido! 🎉';
@@ -1280,7 +1300,7 @@ function ensureAuth(){
       pending.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
         html += '<div class="team-list-item">';
-        html += '<div style="flex:1;font-size:13px;">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'<div style="font-size:11px;color:var(--muted);">'+(m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO') : 'Sin hora')+' · '+phaseInfo(m.phase).label+'</div></div>';
+        html += '<div style="flex:1;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'<div style="font-size:11px;color:var(--muted);">'+(m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO') : 'Sin hora')+' · '+phaseInfo(m.phase).label+'</div></div>';
         html += '<input type="number" min="0" style="width:44px;" data-res-home="'+m.id+'">';
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-res-away="'+m.id+'">';
@@ -1299,7 +1319,7 @@ function ensureAuth(){
       finishedMatches.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
         html += '<div class="team-list-item">';
-        html += '<div style="flex:1;font-size:13px;">'+(home?home.name:'?')+' vs '+(away?away.name:'?')+'</div>';
+        html += '<div style="flex:1;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
         html += '<input type="number" min="0" style="width:44px;" data-edit-home="'+m.id+'" value="'+m.homeScore+'">';
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-edit-away="'+m.id+'" value="'+m.awayScore+'">';
@@ -1314,7 +1334,7 @@ function ensureAuth(){
     html += '<div class="section-title">Equipos</div>';
     state.teams.forEach(function(t){
       html += '<div class="team-list-item" style="flex-wrap:wrap;">';
-      html += '<div style="width:100%;display:flex;align-items:center;gap:8px;">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+t.name+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
+      html += '<div style="width:100%;display:flex;align-items:center;gap:8px;">'+shieldHtml(t,32)+'<div style="flex:1;font-size:13px;">'+escapeHtml(t.name)+'</div><button class="btn btn-danger" data-del-team="'+t.id+'">Eliminar</button></div>';
       html += '<div style="width:100%;margin-top:6px;"><label class="btn" style="display:inline-block;cursor:pointer;"><span data-logo-label="'+t.id+'">Subir escudo</span><input type="file" accept="image/*" data-logo-file="'+t.id+'" style="display:none;"></label></div>';
       html += '</div>';
     });
@@ -1331,7 +1351,7 @@ function ensureAuth(){
     html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">El PIN de cada quien se guarda cifrado — ya no se puede ver, pero sí resetear a uno nuevo si alguien lo olvida.</div>';
     var humanProfilesGestionar = state.profiles.filter(function(p){ return !p.isBot; });
     humanProfilesGestionar.forEach(function(p){
-      html += '<div class="admin-profile-row">'+avatarHtml(p,32)+'<div style="flex:1;font-size:13px;">'+p.name+'</div><button class="btn" data-reset-pin="'+p.id+'">Resetear PIN</button><button class="btn btn-danger" data-del-profile="'+p.id+'">Eliminar</button></div>';
+      html += '<div class="admin-profile-row">'+avatarHtml(p,32)+'<div style="flex:1;font-size:13px;">'+escapeHtml(p.name)+'</div><button class="btn" data-reset-pin="'+p.id+'">Resetear PIN</button><button class="btn btn-danger" data-del-profile="'+p.id+'">Eliminar</button></div>';
     });
     if(!humanProfilesGestionar.length){ html += '<div class="empty" style="padding:14px 0;">Todavía no hay perfiles creados.</div>'; }
     html += '</div>';
@@ -1352,10 +1372,10 @@ function ensureAuth(){
       html += '<div class="form-row"><label>Campeón (pronóstico del bot)</label><select id="bot-champion">';
       html += '<option value="">Selecciona un equipo</option>';
       state.teams.forEach(function(t){
-        html += '<option value="'+t.id+'"'+(botPick.championTeamId===t.id?' selected':'')+'>'+t.name+'</option>';
+        html += '<option value="'+t.id+'"'+(botPick.championTeamId===t.id?' selected':'')+'>'+escapeHtml(t.name)+'</option>';
       });
       html += '</select></div>';
-      html += '<div class="form-row"><label>Goleador (pronóstico del bot)</label><input type="text" id="bot-scorer" placeholder="Nombre del jugador" value="'+(botPick.scorerName||'').replace(/"/g,'&quot;')+'"></div>';
+      html += '<div class="form-row"><label>Goleador (pronóstico del bot)</label><input type="text" id="bot-scorer" placeholder="Nombre del jugador" value="'+escapeHtml(botPick.scorerName||'')+'"></div>';
       html += '<button class="btn btn-gold" id="save-bot-preseason-btn">Guardar pronóstico del bot</button>';
       html += '</div>';
     }
@@ -1366,7 +1386,7 @@ function ensureAuth(){
     state.teams.forEach(function(t){
       var s = state.realStandings[t.id] || {pj:0,pg:0,pe:0,pp:0,gf:0,gc:0};
       html += '<div class="team-list-item" style="flex-wrap:wrap;">';
-      html += '<div style="width:100%;display:flex;align-items:center;gap:8px;margin-bottom:6px;">'+shieldHtml(t,26)+'<span style="font-size:13px;">'+t.name+'</span></div>';
+      html += '<div style="width:100%;display:flex;align-items:center;gap:8px;margin-bottom:6px;">'+shieldHtml(t,26)+'<span style="font-size:13px;">'+escapeHtml(t.name)+'</span></div>';
       html += '<div style="display:flex;gap:6px;width:100%;">';
       ['pj','pg','pe','pp','gf','gc'].forEach(function(field){
         var labels = {pj:'PJ',pg:'PG',pe:'PE',pp:'PP',gf:'GF',gc:'GC'};
@@ -1402,8 +1422,8 @@ function ensureAuth(){
           var pick = state.preseason.picks[pid];
           html += '<label class="scorer-check-row">';
           html += '<input type="checkbox" data-scorer-correct="'+pid+'">';
-          html += '<span style="flex:1;">'+p.name+'</span>';
-          html += '<span style="color:var(--muted);">'+(pick.scorerName||'-')+'</span>';
+          html += '<span style="flex:1;">'+escapeHtml(p.name)+'</span>';
+          html += '<span style="color:var(--muted);">'+escapeHtml(pick.scorerName||'-')+'</span>';
           html += '</label>';
         });
       }
@@ -1753,7 +1773,7 @@ function ensureAuth(){
 
   function teamOptions(){
     return '<option value="">Selecciona</option>' + state.teams.map(function(t){
-      return '<option value="'+t.id+'">'+t.name+'</option>';
+      return '<option value="'+t.id+'">'+escapeHtml(t.name)+'</option>';
     }).join('');
   }
 
