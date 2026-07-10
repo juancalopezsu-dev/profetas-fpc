@@ -51,36 +51,13 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow write: if isAdmin();
 
-      // Predicciones: la propia siempre se puede leer (si no, tu propia
-      // predicción "desaparecería" de tu pantalla en cuanto llegara la
-      // siguiente actualización en tiempo real). Las de los demás solo se
-      // pueden leer si el campo 'visible' ya quedó en true — lo pone
-      // api/live-updates.js (y api/actualizar-resultados.js como respaldo)
-      // apenas pasa el kickoff del partido, nunca el navegador.
-      //
-      // Importante: Firestore rechaza una consulta ENTERA (no solo los
-      // documentos de más) si esa consulta pudiera devolver algún documento
-      // que la regla no deja leer — por eso la app nunca hace una consulta
-      // sin filtro sobre 'predictions'; siempre filtra por
-      // where('visible','==',true) o where('ownerUid','==', tu uid). Para
-      // que Firestore pueda comprobar de antemano que esas dos consultas son
-      // seguras, la condición de la regla tiene que estar escrita EXACTAMENTE
-      // como el filtro de la consulta (mismo campo, comparación directa, sin
-      // funciones como .get() de por medio) — por eso hay una condición
-      // 'resource.data.ownerUid == request.auth.uid' aparte de la que
-      // compara contra el id del documento (profileId), y por eso es
-      // 'resource.data.visible == true' y no 'resource.data.get(...)': con
-      // .get() de por medio, Firestore ya no logra probar que la consulta es
-      // segura y la rechaza entera, aunque los datos en sí sean correctos.
-      //
-      // Solo se puede crear o editar la predicción propia (ownerUid == el
-      // propio uid), o admin (necesario para las predicciones del bot
-      // "Carlos Antonio Vélez", cuyo ownerUid nunca es un uid real).
+      // Predicciones: solo se puede crear/editar/borrar la propia (ownerUid
+      // == el propio uid), o admin (necesario para las predicciones del bot
+      // "Carlos Antonio Vélez", cuyo ownerUid nunca es un uid real). El
+      // permiso de LECTURA de 'predictions' vive aparte, en un bloque de
+      // colección-grupo al final de este archivo — ver el comentario ahí
+      // para el porqué.
       match /predictions/{profileId} {
-        allow read: if isAdmin() ||
-          (isSignedIn() && request.auth.uid == profileId) ||
-          (isSignedIn() && resource.data.ownerUid == request.auth.uid) ||
-          (isSignedIn() && resource.data.visible == true);
         allow create, update: if isAdmin() ||
           (isSignedIn() && request.auth.uid == profileId && request.auth.uid == request.resource.data.ownerUid);
         allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == profileId);
@@ -107,6 +84,37 @@ service cloud.firestore {
     match /profetas/realStandings {
       allow read: if isSignedIn();
       allow write: if isAdmin();
+    }
+
+    // Lectura de predicciones (colección-grupo aparte, path=**): la app
+    // nunca pide "todas las predicciones" de un partido a secas — pide, con
+    // collectionGroup(db,'predictions'), solo las que ya son visibles para
+    // todos (where('visible','==',true)) o las propias
+    // (where('ownerUid','==', tu uid)), combinadas con or(). La propia
+    // siempre se puede leer aunque 'visible' todavía esté en false — si no,
+    // tu propia predicción "desaparecería" de tu pantalla en cuanto llegara
+    // la siguiente actualización en tiempo real. 'visible' lo pone
+    // api/live-updates.js (y api/actualizar-resultados.js como respaldo)
+    // apenas pasa el kickoff del partido — nunca el navegador.
+    //
+    // Por qué esta regla vive en un bloque aparte con 'path=**' en vez de
+    // adentro de 'match /profetas/matches/matches/{matchId}': Firestore solo
+    // aplica una regla a una collectionGroup QUERY (a diferencia de leer un
+    // documento puntual con su ruta completa) si esa regla está declarada
+    // así, con el comodín recursivo — una regla anidada dentro de la ruta
+    // exacta del padre (como estaba antes) nunca se usa para validar
+    // consultas de colección-grupo, sin importar qué tan bien escrita esté
+    // la condición: Firestore simplemente no la considera y rechaza la
+    // consulta completa. Esto es aparte de (y además de) la otra regla ya
+    // documentada: la condición también tiene que estar escrita como
+    // comparación directa de campo (resource.data.campo == valor), sin
+    // funciones como .get() de por medio, para que Firestore pueda probar
+    // de antemano que la consulta con ese where() es segura.
+    match /{path=**}/predictions/{profileId} {
+      allow read: if isAdmin() ||
+        (isSignedIn() && request.auth.uid == profileId) ||
+        (isSignedIn() && resource.data.ownerUid == request.auth.uid) ||
+        (isSignedIn() && resource.data.visible == true);
     }
   }
 }
