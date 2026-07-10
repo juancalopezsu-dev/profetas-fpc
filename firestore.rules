@@ -62,9 +62,16 @@ service cloud.firestore {
       // documentos de más) si esa consulta pudiera devolver algún documento
       // que la regla no deja leer — por eso la app nunca hace una consulta
       // sin filtro sobre 'predictions'; siempre filtra por
-      // where('visible','==',true) o where('ownerUid','==', tu uid), y esos
-      // mismos filtros son los que hacen que Firestore pueda comprobar de
-      // antemano que la consulta es segura.
+      // where('visible','==',true) o where('ownerUid','==', tu uid). Para
+      // que Firestore pueda comprobar de antemano que esas dos consultas son
+      // seguras, la condición de la regla tiene que estar escrita EXACTAMENTE
+      // como el filtro de la consulta (mismo campo, comparación directa, sin
+      // funciones como .get() de por medio) — por eso hay una condición
+      // 'resource.data.ownerUid == request.auth.uid' aparte de la que
+      // compara contra el id del documento (profileId), y por eso es
+      // 'resource.data.visible == true' y no 'resource.data.get(...)': con
+      // .get() de por medio, Firestore ya no logra probar que la consulta es
+      // segura y la rechaza entera, aunque los datos en sí sean correctos.
       //
       // Solo se puede crear o editar la predicción propia (ownerUid == el
       // propio uid), o admin (necesario para las predicciones del bot
@@ -72,7 +79,8 @@ service cloud.firestore {
       match /predictions/{profileId} {
         allow read: if isAdmin() ||
           (isSignedIn() && request.auth.uid == profileId) ||
-          (isSignedIn() && resource.data.get('visible', false) == true);
+          (isSignedIn() && resource.data.ownerUid == request.auth.uid) ||
+          (isSignedIn() && resource.data.visible == true);
         allow create, update: if isAdmin() ||
           (isSignedIn() && request.auth.uid == profileId && request.auth.uid == request.resource.data.ownerUid);
         allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == profileId);
