@@ -1,6 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getFirestore, doc, getDoc, setDoc, collection, collectionGroup, deleteDoc, writeBatch, onSnapshot
+  getFirestore, doc, getDoc, setDoc, collection, collectionGroup, deleteDoc, writeBatch, onSnapshot,
+  query, where, or
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getAuth, onAuthStateChanged, signInAnonymously, signInWithCustomToken, signOut
@@ -242,9 +243,13 @@ function ensureAuth(){
   }
   async function savePrediction(matchId, profileId, pred){
     try{
+      // merge:true a propósito: nunca debe borrar el campo 'visible' que
+      // api/live-updates.js (o api/actualizar-resultados.js) le haya puesto
+      // aparte — ese campo es lo único que permite que Firestore le muestre
+      // esta predicción a los demás una vez pasó el kickoff (ver firestore.rules).
       await setDoc(doc(db, 'profetas', 'matches', 'matches', matchId, 'predictions', profileId), {
         home: pred.home, away: pred.away, ownerUid: profileId
-      });
+      }, { merge: true });
     }catch(e){ console.error('save prediction error', matchId, profileId, e); alert('No se pudo guardar tu predicción. Revisa tu conexión.'); }
   }
   async function deletePrediction(matchId, profileId){
@@ -356,7 +361,19 @@ function ensureAuth(){
       state.matches = list;
     }, refreshCurrentView);
 
-    var predictionsPromise = watchCollectionGroup(collectionGroup(db, 'predictions'), function(map){
+    // Firestore rechaza la consulta ENTERA si, sin filtro, pudiera devolver
+    // algún documento que la regla no deja leer (no filtra resultado por
+    // resultado como uno esperaría). Por eso nunca se pide "todas las
+    // predicciones" a secas: se piden solo las que ya son visibles para
+    // todos (visible==true, lo pone api/live-updates.js al pasar el
+    // kickoff) o las propias (ownerUid==mi uid) — ambos filtros calzan
+    // exactamente con las condiciones de 'allow read' en firestore.rules,
+    // que es lo que le permite a Firestore comprobar que la consulta es
+    // segura sin tener que mirar cada documento uno por uno.
+    var myUid = auth.currentUser ? auth.currentUser.uid : '__none__';
+    var predictionsQuery = query(collectionGroup(db, 'predictions'),
+      or(where('visible', '==', true), where('ownerUid', '==', myUid)));
+    var predictionsPromise = watchCollectionGroup(predictionsQuery, function(map){
       state.predictions = map;
     }, refreshCurrentView);
 
@@ -479,6 +496,19 @@ function ensureAuth(){
     return new Date(match.kickoff).getTime() <= Date.now();
   }
 
+  // 'status' es el campo fuente de verdad para saber si un partido va en
+  // vivo o ya terminó. Los partidos guardados antes de que existiera este
+  // campo no lo tienen, así que si falta se infiere del marcador (como se
+  // hacía antes): con marcador ya es 'finished', sin marcador es 'scheduled'.
+  function matchStatus(m){
+    if(m.status==='live' || m.status==='finished' || m.status==='scheduled') return m.status;
+    if(!(m.homeScore===null || m.homeScore===undefined)) return 'finished';
+    return 'scheduled';
+  }
+  function hasLiveMatches(){
+    return state.matches.some(function(m){ return matchStatus(m)==='live'; });
+  }
+
   // Datos por fase: etiqueta, clase CSS del badge y puntos por acertar
   // resultado/marcador exacto. Único lugar donde viven estos números.
   function phaseInfo(phase){
@@ -581,6 +611,10 @@ function ensureAuth(){
           var data = await resp.json();
           if(!resp.ok){ alert(data.error || 'PIN incorrecto.'); return; }
           await signInWithCustomToken(auth, data.token);
+          // Vuelve a suscribir las predicciones con el uid nuevo — la
+          // consulta de "mis predicciones" quedó armada con el uid anónimo
+          // de antes de iniciar sesión (ver comentario en loadAll()).
+          await loadAll();
           state.myId = pid;
           showMain();
         }catch(e){
@@ -626,6 +660,7 @@ function ensureAuth(){
           return;
         }
         await signInWithCustomToken(auth, data.token);
+        await loadAll();
         var newP = { id: data.profileId, name: name, photo: pendingPhoto, ownerUid: data.profileId };
         await saveProfile(newP);
         state.myId = newP.id;
@@ -678,11 +713,13 @@ function ensureAuth(){
 
   /* ---------- PREDICCIONES ---------- */
   function renderPredicciones(el){
-    var upcoming = state.matches.filter(function(m){ return (m.homeScore===null || m.homeScore===undefined) && !isLocked(m); })
+    var upcoming = state.matches.filter(function(m){ return matchStatus(m)==='scheduled' && !isLocked(m); })
       .sort(function(a,b){ return new Date(a.kickoff||0)-new Date(b.kickoff||0); });
-    var lockedNoResult = state.matches.filter(function(m){ return (m.homeScore===null || m.homeScore===undefined) && isLocked(m); })
+    var lockedNoResult = state.matches.filter(function(m){ return matchStatus(m)==='scheduled' && isLocked(m); })
       .sort(function(a,b){ return new Date(a.kickoff||0)-new Date(b.kickoff||0); });
-    var finished = state.matches.filter(function(m){ return !(m.homeScore===null || m.homeScore===undefined); })
+    var live = state.matches.filter(function(m){ return matchStatus(m)==='live'; })
+      .sort(function(a,b){ return new Date(a.kickoff||0)-new Date(b.kickoff||0); });
+    var finished = state.matches.filter(function(m){ return matchStatus(m)==='finished'; })
       .sort(function(a,b){ return new Date(b.kickoff||0)-new Date(a.kickoff||0); });
 
     var html = '';
@@ -691,6 +728,10 @@ function ensureAuth(){
       html += '<div class="empty">No hay partidos abiertos para predecir.</div>';
     } else {
       upcoming.forEach(function(m){ html += matchCardHtml(m, true); });
+    }
+    if(live.length){
+      html += '<div class="section-title" style="margin-top:22px;">🔴 En vivo</div>';
+      live.forEach(function(m){ html += matchCardHtml(m, false, 'live'); });
     }
     if(lockedNoResult.length){
       html += '<div class="section-title" style="margin-top:22px;">Cerrados, esperando resultado</div>';
@@ -728,15 +769,30 @@ function ensureAuth(){
     });
   }
 
+  // Lista de goles (equipo + minuto) ordenada, usada tanto en la tarjeta de
+  // un partido en vivo/finalizado como en el modal de predicciones. Los
+  // goles pueden venir de API-Football (live-updates) o cargados a mano en
+  // Gestionar — para efectos de mostrarlos da igual el origen.
+  function goalsListHtml(m, home, away){
+    if(!m.goals || !m.goals.length) return '';
+    var sorted = m.goals.slice().sort(function(a,b){ return (a.minute||0)-(b.minute||0); });
+    var items = sorted.map(function(g){
+      var t = g.team==='home' ? home : away;
+      return '<div class="goal-row">⚽ <b>'+(g.minute!=null?g.minute+'\'':'')+'</b> '+escapeHtml(t?t.name:'?')+'</div>';
+    }).join('');
+    return '<div class="goals-list">'+items+'</div>';
+  }
+
   function matchCardHtml(m, editable, waitingResult){
     var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
     var phaseClass = phaseInfo(m.phase).cssClass;
     var phaseLabel = phaseInfo(m.phase).label;
+    var isLive = waitingResult === 'live';
     var myPred = (state.predictions[m.id]||{})[state.myId] || {home:'',away:''};
     var kickoffLabel = m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO', {weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}) : ('Fecha '+(m.matchday||'-'));
 
     var html = '<div class="card match-card">';
-    html += '<div class="match-top"><span class="phase-badge '+phaseClass+'">'+phaseLabel+'</span><span class="match-meta">'+kickoffLabel+'</span></div>';
+    html += '<div class="match-top"><span class="phase-badge '+phaseClass+'">'+phaseLabel+'</span>'+(isLive?'<span class="live-badge"><span class="live-dot"></span>EN VIVO</span>':'')+'<span class="match-meta">'+kickoffLabel+'</span></div>';
     html += '<div class="match-teams">';
     html += '<div class="team">'+shieldHtml(home)+'<span class="team-name">'+escapeHtml(home?home.name:'?')+'</span></div>';
 
@@ -746,7 +802,7 @@ function ensureAuth(){
       html += '<span class="vs-label">–</span>';
       html += '<input type="number" min="0" data-pred-away="'+m.id+'" value="'+escapeHtml(myPred.away)+'">';
       html += '</div>';
-    } else if(waitingResult){
+    } else if(waitingResult === true){
       html += '<div class="score-inputs"><span class="vs-label">vs</span></div>';
     } else {
       html += '<div class="score-inputs"><span class="result-final">'+m.homeScore+'</span><span class="vs-label">–</span><span class="result-final">'+m.awayScore+'</span></div>';
@@ -754,10 +810,11 @@ function ensureAuth(){
 
     html += '<div class="team">'+shieldHtml(away)+'<span class="team-name">'+escapeHtml(away?away.name:'?')+'</span></div>';
     html += '</div>';
+    if(isLive){ html += goalsListHtml(m, home, away); }
 
     if(editable){
       html += '<div class="match-actions"><button class="btn btn-gold" data-save-pred="'+m.id+'">Guardar predicción</button></div>';
-    } else if(waitingResult){
+    } else if(waitingResult === true){
       var effW = effectivePrediction(m, state.myId);
       html += '<div class="match-actions"><span class="locked-tag">Predicción cerrada</span>';
       if(effW){
@@ -772,7 +829,7 @@ function ensureAuth(){
       html += '<div class="match-actions">';
       if(eff){
         var label = eff.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+escapeHtml(eff.pred.home)+'-'+escapeHtml(eff.pred.away)) : ('Tu predicción '+escapeHtml(eff.pred.home)+'-'+escapeHtml(eff.pred.away));
-        html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+label+' · '+pts+' pts</span>';
+        html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+label+' · '+pts+(isLive?' pts (provisional)':' pts')+'</span>';
       } else {
         html += '<span class="points-pill zero">No predijiste este partido</span>';
       }
@@ -791,6 +848,9 @@ function ensureAuth(){
     html += '</div>';
 
     if(state.tablaSub==='apuesta'){
+      if(hasLiveMatches()){
+        html += '<div class="live-banner"><span class="live-badge"><span class="live-dot"></span>EN VIVO</span> Hay partidos en curso — estos puntos son provisionales y pueden cambiar.</div>';
+      }
       var rows = computeStandings();
       if(!rows.length){
         html += '<div class="empty">Todavía no hay jugadores.</div>';
@@ -892,11 +952,12 @@ function ensureAuth(){
           var pred = eff.pred;
           var hasResult = !(m.homeScore===null || m.homeScore===undefined);
           var pts = hasResult ? pointsForPrediction(m, pred) : null;
+          var mIsLive = matchStatus(m)==='live';
           var predLabel = eff.auto ? '🤖 Predicción automática (Carlos Antonio Vélez)' : 'Predijo';
           html += '<span>'+predLabel+': <b style="color:var(--white);">'+escapeHtml(pred.home)+'-'+escapeHtml(pred.away)+'</b></span>';
           if(hasResult){
-            html += '<span>Real: <b style="color:var(--white);">'+m.homeScore+'-'+m.awayScore+'</b></span>';
-            html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+pts+' pts</span>';
+            html += '<span>'+(mIsLive?'🔴 En vivo':'Real')+': <b style="color:var(--white);">'+m.homeScore+'-'+m.awayScore+'</b></span>';
+            html += '<span class="points-pill'+(pts===0?' zero':'')+'">'+pts+(mIsLive?' pts (prov.)':' pts')+'</span>';
           } else {
             html += '<span>Sin resultado todavía</span>';
           }
@@ -954,12 +1015,16 @@ function ensureAuth(){
     if(!match) return;
     var home = teamById(match.homeTeamId), away = teamById(match.awayTeamId);
     var hasResult = !(match.homeScore===null || match.homeScore===undefined);
+    var isLive = matchStatus(match)==='live';
 
     var html = '<div class="modal-overlay" id="match-predictions-modal">';
     html += '<div class="modal-box">';
     html += '<div class="modal-header"><div class="modal-title">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div><button class="btn" id="close-match-predictions">Cerrar</button></div>';
+    if(isLive){ html += '<div style="text-align:center;margin-top:6px;"><span class="live-badge"><span class="live-dot"></span>EN VIVO</span></div>'; }
     if(hasResult){
       html += '<div style="text-align:center;font-family:\'Oswald\',sans-serif;font-size:24px;font-weight:700;margin:10px 0;color:var(--gold);">'+match.homeScore+' - '+match.awayScore+'</div>';
+      if(isLive){ html += '<div style="text-align:center;font-size:11px;color:var(--muted);margin-top:-6px;margin-bottom:10px;">Marcador y puntos provisionales</div>'; }
+      html += goalsListHtml(match, home, away);
     } else {
       html += '<div style="text-align:center;font-size:12px;color:var(--muted);margin:10px 0;">Todavía no hay resultado cargado</div>';
     }
@@ -1218,6 +1283,7 @@ function ensureAuth(){
           return;
         }
         await signInWithCustomToken(auth, data.token);
+        await loadAll();
         state.adminUnlocked = true;
         renderGestionar(el);
       }catch(e){
@@ -1293,25 +1359,58 @@ function ensureAuth(){
     html += '<button class="btn" id="auto-fetch-btn">Buscar resultados automáticos (API)</button>';
     html += '<span id="auto-fetch-status" style="font-size:11px;color:var(--muted);"></span>';
     html += '</div>';
-    var pending = state.matches.filter(function(m){ return m.homeScore===null||m.homeScore===undefined; });
+    var pending = state.matches.filter(function(m){ return matchStatus(m)==='scheduled'; });
     if(!pending.length){
       html += '<div class="empty" style="padding:14px 0;">No hay partidos pendientes de resultado.</div>';
     } else {
       pending.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-        html += '<div class="team-list-item">';
+        html += '<div class="team-list-item" style="flex-wrap:wrap;">';
         html += '<div style="flex:1;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'<div style="font-size:11px;color:var(--muted);">'+(m.kickoff ? new Date(m.kickoff).toLocaleString('es-CO') : 'Sin hora')+' · '+phaseInfo(m.phase).label+'</div></div>';
         html += '<input type="number" min="0" style="width:44px;" data-res-home="'+m.id+'">';
         html += '<span class="vs-label">-</span>';
         html += '<input type="number" min="0" style="width:44px;" data-res-away="'+m.id+'">';
         html += '<button class="btn btn-gold" data-save-result="'+m.id+'">Guardar</button>';
         html += '<button class="btn btn-danger" data-del-match="'+m.id+'">Eliminar</button>';
+        if(isLocked(m)){
+          html += '<div style="width:100%;margin-top:6px;"><button class="btn" data-mark-live="'+m.id+'">🔴 Marcar en vivo ahora</button></div>';
+        }
         html += '</div>';
       });
     }
     html += '</div>';
 
-    var finishedMatches = state.matches.filter(function(m){ return !(m.homeScore===null||m.homeScore===undefined); });
+    var liveMatchesGestionar = state.matches.filter(function(m){ return matchStatus(m)==='live'; });
+    if(liveMatchesGestionar.length){
+      html += '<div class="card">';
+      html += '<div class="section-title">🔴 Partidos en vivo</div>';
+      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">El marcador se actualiza solo cada 5 minutos (API-Football). Si la API falla o se retrasa, edítalo aquí a mano — nunca se queda bloqueado esperándola.</div>';
+      liveMatchesGestionar.forEach(function(m){
+        var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
+        html += '<div class="team-list-item" style="flex-wrap:wrap;">';
+        html += '<div style="width:100%;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
+        html += '<input type="number" min="0" style="width:44px;" data-live-home="'+m.id+'" value="'+(m.homeScore==null?0:m.homeScore)+'">';
+        html += '<span class="vs-label">-</span>';
+        html += '<input type="number" min="0" style="width:44px;" data-live-away="'+m.id+'" value="'+(m.awayScore==null?0:m.awayScore)+'">';
+        html += '<button class="btn" data-live-score="'+m.id+'">Actualizar marcador</button>';
+        html += '<button class="btn btn-gold" data-finish-match="'+m.id+'">Finalizar partido</button>';
+        html += '<div style="width:100%;margin-top:8px;">';
+        (m.goals||[]).forEach(function(g, idx){
+          var t = g.team==='home'?home:away;
+          html += '<div class="goal-row"><span style="flex:1;">⚽ '+(g.minute!=null?g.minute+'\'':'')+' '+escapeHtml(t?t.name:'?')+'</span><button class="btn btn-danger" style="padding:4px 8px;" data-del-goal="'+m.id+'|'+idx+'">Quitar</button></div>';
+        });
+        html += '</div>';
+        html += '<div style="width:100%;display:flex;gap:6px;align-items:flex-end;margin-top:6px;">';
+        html += '<div class="form-row" style="margin-bottom:0;flex:1;"><label>Gol de</label><select data-goal-team="'+m.id+'"><option value="home">'+escapeHtml(home?home.name:'Local')+'</option><option value="away">'+escapeHtml(away?away.name:'Visitante')+'</option></select></div>';
+        html += '<div class="form-row" style="margin-bottom:0;width:64px;"><label>Minuto</label><input type="number" min="0" max="130" data-goal-minute="'+m.id+'"></div>';
+        html += '<button class="btn" data-add-goal="'+m.id+'">Agregar gol</button>';
+        html += '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+
+    var finishedMatches = state.matches.filter(function(m){ return matchStatus(m)==='finished'; });
     if(finishedMatches.length){
       html += '<div class="card">';
       html += '<div class="section-title">Editar resultados ya cargados</div>';
@@ -1461,7 +1560,7 @@ function ensureAuth(){
       // reglas de Firestore puedan comparar "¿ya pasó la hora?" al decidir
       // si las predicciones ajenas de este partido ya se pueden leer.
       var kickoffMs = kickoff ? new Date(kickoff).getTime() : null;
-      var newMatch = { id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoffMs, phase:phase, homeScore:null, awayScore:null };
+      var newMatch = { id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoffMs, phase:phase, homeScore:null, awayScore:null, status:'scheduled', goals:[] };
       state.matches.push(newMatch);
       await saveMatch(newMatch);
       var botId = getBotProfileId();
@@ -1477,7 +1576,7 @@ function ensureAuth(){
 
     document.getElementById('auto-fetch-btn').addEventListener('click', async function(){
       var statusEl = document.getElementById('auto-fetch-status');
-      var pendingMatches = state.matches.filter(function(m){ return m.homeScore===null||m.homeScore===undefined; });
+      var pendingMatches = state.matches.filter(function(m){ return matchStatus(m)==='scheduled'; });
       if(!pendingMatches.length){ statusEl.textContent = 'No hay partidos pendientes.'; return; }
       statusEl.innerHTML = '<span class="spinner"></span> Buscando...';
       var dates = Array.from(new Set(pendingMatches.filter(function(m){return m.kickoff;}).map(function(m){ return bogotaDateStr(m.kickoff); })));
@@ -1517,7 +1616,7 @@ function ensureAuth(){
         btn.disabled = true;
         btn.textContent = 'Guardando...';
         var m = state.matches.find(function(x){return x.id===mid;});
-        m.homeScore = parseInt(h); m.awayScore = parseInt(a);
+        m.homeScore = parseInt(h); m.awayScore = parseInt(a); m.status = 'finished';
         await saveMatch(m);
         renderGestionar(el);
       });
@@ -1533,7 +1632,83 @@ function ensureAuth(){
         btn.disabled = true;
         btn.textContent = 'Actualizando...';
         var m = state.matches.find(function(x){return x.id===mid;});
+        m.homeScore = parseInt(h); m.awayScore = parseInt(a); m.status = 'finished';
+        await saveMatch(m);
+        renderGestionar(el);
+      });
+    });
+
+    // Respaldo manual del marcador en vivo: nunca depende de que el cron de
+    // /api/live-updates ande a tiempo ni de que API-Football responda.
+    el.querySelectorAll('[data-mark-live]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var mid = btn.getAttribute('data-mark-live');
+        btn.disabled = true;
+        var m = state.matches.find(function(x){return x.id===mid;});
+        m.status = 'live';
+        if(m.homeScore==null) m.homeScore = 0;
+        if(m.awayScore==null) m.awayScore = 0;
+        await saveMatch(m);
+        renderGestionar(el);
+      });
+    });
+
+    el.querySelectorAll('[data-live-score]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var mid = btn.getAttribute('data-live-score');
+        var h = el.querySelector('[data-live-home="'+mid+'"]').value;
+        var a = el.querySelector('[data-live-away="'+mid+'"]').value;
+        if(h===''||a===''){ alert('Ingresa el marcador completo'); return; }
+        btn.disabled = true;
+        btn.textContent = 'Actualizando...';
+        var m = state.matches.find(function(x){return x.id===mid;});
         m.homeScore = parseInt(h); m.awayScore = parseInt(a);
+        await saveMatch(m);
+        renderGestionar(el);
+      });
+    });
+
+    el.querySelectorAll('[data-add-goal]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var mid = btn.getAttribute('data-add-goal');
+        var team = el.querySelector('[data-goal-team="'+mid+'"]').value;
+        var minuteVal = el.querySelector('[data-goal-minute="'+mid+'"]').value;
+        var minute = minuteVal===''? null : parseInt(minuteVal);
+        if(minuteVal!=='' && (isNaN(minute) || minute<0)){ alert('El minuto no es válido'); return; }
+        btn.disabled = true;
+        var m = state.matches.find(function(x){return x.id===mid;});
+        if(!m.goals) m.goals = [];
+        m.goals.push({ team: team, minute: minute });
+        if(team==='home'){ m.homeScore = (m.homeScore||0) + 1; } else { m.awayScore = (m.awayScore||0) + 1; }
+        await saveMatch(m);
+        renderGestionar(el);
+      });
+    });
+
+    el.querySelectorAll('[data-del-goal]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var parts = btn.getAttribute('data-del-goal').split('|');
+        var mid = parts[0], idx = parseInt(parts[1]);
+        if(!confirm('¿Quitar este gol? El marcador se ajusta automáticamente.')) return;
+        btn.disabled = true;
+        var m = state.matches.find(function(x){return x.id===mid;});
+        var goal = (m.goals||[])[idx];
+        if(!goal) return;
+        m.goals.splice(idx, 1);
+        if(goal.team==='home'){ m.homeScore = Math.max(0, (m.homeScore||0) - 1); } else { m.awayScore = Math.max(0, (m.awayScore||0) - 1); }
+        await saveMatch(m);
+        renderGestionar(el);
+      });
+    });
+
+    el.querySelectorAll('[data-finish-match]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var mid = btn.getAttribute('data-finish-match');
+        if(!confirm('¿Finalizar este partido con el marcador actual? Quedará como resultado oficial.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Finalizando...';
+        var m = state.matches.find(function(x){return x.id===mid;});
+        m.status = 'finished';
         await saveMatch(m);
         renderGestionar(el);
       });
@@ -1796,6 +1971,9 @@ function ensureAuth(){
     state.tab = 'predicciones';
     document.getElementById('main-shell').classList.add('hidden');
     await ensureAuth();
+    // El nuevo uid anónimo es distinto al de antes — vuelve a suscribir las
+    // predicciones para que "mis predicciones" quede armado con ese uid.
+    await loadAll();
     renderLogin();
   }
 

@@ -213,6 +213,25 @@
   .spinner{display:inline-block; width:12px; height:12px; border:2px solid var(--muted); border-top-color:var(--gold); border-radius:50%; animation:spin 0.7s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
 
+  /* Marcador en vivo */
+  .live-badge{
+    display:inline-flex; align-items:center; gap:5px; font-size:10px; padding:3px 8px; border-radius:20px;
+    text-transform:uppercase; letter-spacing:0.06em; font-family:'Oswald',sans-serif;
+    background:rgba(193,68,59,0.18); color:var(--danger); border:1px solid rgba(193,68,59,0.4);
+  }
+  .live-dot{width:6px; height:6px; border-radius:50%; background:var(--danger); animation:live-pulse 1.4s ease-in-out infinite;}
+  @keyframes live-pulse{0%,100%{opacity:1;} 50%{opacity:0.35;}}
+  .live-banner{
+    display:flex; align-items:center; gap:8px; font-size:12px; color:var(--white);
+    background:rgba(193,68,59,0.12); border:1px solid rgba(193,68,59,0.3); border-radius:10px;
+    padding:8px 12px; margin-bottom:12px;
+  }
+  .goals-list, .goal-row{font-size:12px; color:var(--muted);}
+  .goals-list{margin-top:4px;}
+  .goal-row{display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line);}
+  .goal-row:last-child{border-bottom:none;}
+  .goals-list .goal-row{justify-content:center; border-bottom:none; padding:2px 0;}
+
   /* Pantalla de carga inicial */
   .boot-loading{
     position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;

@@ -8,12 +8,6 @@ service cloud.firestore {
     function isAdmin() {
       return request.auth != null && request.auth.token.admin == true;
     }
-    // 'kickoff' se guarda como número (milisegundos desde 1970), no como
-    // texto, precisamente para poder compararlo aquí de forma confiable.
-    function matchKickoffPassed(matchId) {
-      let m = get(/databases/$(database)/documents/profetas/matches/matches/$(matchId)).data;
-      return m.kickoff != null && m.kickoff <= request.time.toMillis();
-    }
 
     // Equipos: cualquiera autenticado (aunque sea anónimo) puede leerlos;
     // solo admin puede crear/editar/borrar.
@@ -60,17 +54,25 @@ service cloud.firestore {
       // Predicciones: la propia siempre se puede leer (si no, tu propia
       // predicción "desaparecería" de tu pantalla en cuanto llegara la
       // siguiente actualización en tiempo real). Las de los demás solo se
-      // pueden leer si el partido ya cerró (kickoff pasado) o si eres
-      // admin — así que ocultarlas hasta el kickoff ya no es solo una
-      // regla de la interfaz, también es una regla de acceso a los datos:
-      // ni abriendo la consola del navegador se pueden leer de antemano.
+      // pueden leer si el campo 'visible' ya quedó en true — lo pone
+      // api/live-updates.js (y api/actualizar-resultados.js como respaldo)
+      // apenas pasa el kickoff del partido, nunca el navegador.
+      //
+      // Importante: Firestore rechaza una consulta ENTERA (no solo los
+      // documentos de más) si esa consulta pudiera devolver algún documento
+      // que la regla no deja leer — por eso la app nunca hace una consulta
+      // sin filtro sobre 'predictions'; siempre filtra por
+      // where('visible','==',true) o where('ownerUid','==', tu uid), y esos
+      // mismos filtros son los que hacen que Firestore pueda comprobar de
+      // antemano que la consulta es segura.
+      //
       // Solo se puede crear o editar la predicción propia (ownerUid == el
       // propio uid), o admin (necesario para las predicciones del bot
       // "Carlos Antonio Vélez", cuyo ownerUid nunca es un uid real).
       match /predictions/{profileId} {
         allow read: if isAdmin() ||
           (isSignedIn() && request.auth.uid == profileId) ||
-          (isSignedIn() && matchKickoffPassed(matchId));
+          (isSignedIn() && resource.data.get('visible', false) == true);
         allow create, update: if isAdmin() ||
           (isSignedIn() && request.auth.uid == profileId && request.auth.uid == request.resource.data.ownerUid);
         allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == profileId);
