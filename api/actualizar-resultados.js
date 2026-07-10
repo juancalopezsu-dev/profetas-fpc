@@ -17,6 +17,17 @@ import { getFirestore } from 'firebase-admin/firestore';
 
 const LEAGUE_ID = 239; // Liga BetPlay Dimayor / Primera A Colombia
 
+// Colombia (Bogotá) no tiene horario de verano, siempre es UTC-5. Esta
+// función devuelve la fecha "de Colombia" (YYYY-MM-DD) de un kickoff
+// guardado en milisegundos, sin depender de la zona horaria del servidor
+// (Vercel corre en UTC) — importante para no pedirle a API-Football la
+// fecha equivocada en partidos nocturnos (8pm Colombia ya es el día
+// siguiente en UTC).
+function bogotaDateStr(kickoff) {
+  const epochMs = typeof kickoff === 'number' ? kickoff : new Date(kickoff).getTime();
+  return new Date(epochMs - 5 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
 function getDb() {
   if (!getApps().length) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -67,11 +78,11 @@ export default async function handler(req, res) {
     const teams = teamsSnap.docs.map(d => d.data());
     const teamById = id => teams.find(t => t.id === id);
 
-    const dates = Array.from(new Set(pendingDocs.map(d => d.data().kickoff.slice(0, 10))));
+    const dates = Array.from(new Set(pendingDocs.map(d => bogotaDateStr(d.data().kickoff))));
     let updatedCount = 0;
 
     for (const date of dates) {
-      const dayDocs = pendingDocs.filter(d => d.data().kickoff.slice(0, 10) === date);
+      const dayDocs = pendingDocs.filter(d => bogotaDateStr(d.data().kickoff) === date);
       const season = new Date(date).getFullYear();
       const url = `https://v3.football.api-sports.io/fixtures?league=${LEAGUE_ID}&season=${season}&date=${date}`;
 

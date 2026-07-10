@@ -68,6 +68,16 @@ function ensureAuth(){
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
   function randomPin(){ return String(Math.floor(1000 + Math.random()*9000)); }
 
+  // Colombia (Bogotá) no tiene horario de verano, siempre es UTC-5. Esta
+  // función devuelve la fecha "de Colombia" (YYYY-MM-DD) de un instante en
+  // milisegundos, sin depender de la zona horaria de quien la ejecute —
+  // importante para no pedirle a API-Football la fecha equivocada en
+  // partidos nocturnos (ej. 8pm Colombia ya es el día siguiente en UTC).
+  function bogotaDateStr(kickoff){
+    var epochMs = typeof kickoff === 'number' ? kickoff : new Date(kickoff).getTime();
+    return new Date(epochMs - 5*3600*1000).toISOString().slice(0,10);
+  }
+
   /* ---------- MANEJO DE ERRORES ---------- */
   // Muestra el error en pantalla en vez de dejar la app en blanco/verde en silencio.
   // Así se puede ver en el celular mismo qué está fallando, sin necesidad de conectar
@@ -1427,7 +1437,11 @@ function ensureAuth(){
       if(!home || !away || home===away){ alert('Elige dos equipos distintos'); return; }
       btn.disabled = true;
       btn.textContent = 'Agregando...';
-      var newMatch = { id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoff || null, phase:phase, homeScore:null, awayScore:null };
+      // kickoff se guarda como milisegundos (no como texto) para que las
+      // reglas de Firestore puedan comparar "¿ya pasó la hora?" al decidir
+      // si las predicciones ajenas de este partido ya se pueden leer.
+      var kickoffMs = kickoff ? new Date(kickoff).getTime() : null;
+      var newMatch = { id:uid(), homeTeamId:home, awayTeamId:away, kickoff: kickoffMs, phase:phase, homeScore:null, awayScore:null };
       state.matches.push(newMatch);
       await saveMatch(newMatch);
       var botId = getBotProfileId();
@@ -1446,7 +1460,7 @@ function ensureAuth(){
       var pendingMatches = state.matches.filter(function(m){ return m.homeScore===null||m.homeScore===undefined; });
       if(!pendingMatches.length){ statusEl.textContent = 'No hay partidos pendientes.'; return; }
       statusEl.innerHTML = '<span class="spinner"></span> Buscando...';
-      var dates = Array.from(new Set(pendingMatches.filter(function(m){return m.kickoff;}).map(function(m){ return m.kickoff.slice(0,10); })));
+      var dates = Array.from(new Set(pendingMatches.filter(function(m){return m.kickoff;}).map(function(m){ return bogotaDateStr(m.kickoff); })));
       if(!dates.length){ statusEl.textContent = 'Agrega fecha/hora a los partidos para poder buscarlos.'; return; }
       var found = 0;
       for(var i=0;i<dates.length;i++){

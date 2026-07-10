@@ -4,7 +4,11 @@
 //  1. Partidos y predicciones: pasa el documento único 'profetas/matches'
 //     (con matches[] y predictions{} adentro) a documentos individuales en
 //     'profetas/matches/matches/{matchId}' y 'profetas/matches/matches/{matchId}/predictions/{profileId}',
-//     con ownerUid en cada predicción.
+//     con ownerUid en cada predicción. De paso, convierte 'kickoff' de
+//     texto a milisegundos (número) en cualquier partido que todavía lo
+//     tenga como texto — las reglas de Firestore necesitan que sea número
+//     para poder comparar "¿ya pasó la hora?" y decidir si las
+//     predicciones ajenas de ese partido ya se pueden leer.
 //  2. Perfiles: a cada perfil que todavía no tenga 'ownerUid' le agrega
 //     ownerUid = su propio id, mueve su PIN (si tiene) a un hash bcrypt en
 //     'profetas/profilePins/profilePins/{profileId}' (colección a la que el
@@ -41,6 +45,11 @@ function getApp() {
   return getApps()[0];
 }
 
+function kickoffToMillis(kickoff) {
+  if (kickoff === null || kickoff === undefined) return null;
+  return typeof kickoff === 'number' ? kickoff : new Date(kickoff).getTime();
+}
+
 async function migrateMatches(db) {
   const oldRef = db.collection('profetas').doc('matches');
   const oldSnap = await oldRef.get();
@@ -71,7 +80,7 @@ async function migrateMatches(db) {
       id: m.id,
       homeTeamId: m.homeTeamId,
       awayTeamId: m.awayTeamId,
-      kickoff: m.kickoff || null,
+      kickoff: kickoffToMillis(m.kickoff),
       phase: m.phase || 'regular',
       homeScore: m.homeScore === undefined ? null : m.homeScore,
       awayScore: m.awayScore === undefined ? null : m.awayScore
@@ -126,6 +135,22 @@ async function migrateProfiles(db) {
   return { profilesMigrated, totalProfiles: profilesSnap.size };
 }
 
+// Cubre el caso de partidos que ya se migraron a la subcolección en una
+// corrida anterior (antes de que kickoffToMillis existiera) y se quedaron
+// con 'kickoff' en texto en vez de en milisegundos.
+async function fixKickoffFormats(db) {
+  const matchesSnap = await db.collection('profetas').doc('matches').collection('matches').get();
+  let fixed = 0;
+  for (const matchDoc of matchesSnap.docs) {
+    const m = matchDoc.data();
+    if (m.kickoff !== null && m.kickoff !== undefined && typeof m.kickoff !== 'number') {
+      await matchDoc.ref.update({ kickoff: kickoffToMillis(m.kickoff) });
+      fixed++;
+    }
+  }
+  return { kickoffsFixed: fixed, totalMatches: matchesSnap.size };
+}
+
 async function deleteLegacyAdminDoc(db) {
   const ref = db.collection('profetas').doc('admin');
   const snap = await ref.get();
@@ -158,10 +183,11 @@ export default async function handler(req, res) {
     const db = getFirestore();
 
     const matchesResult = await migrateMatches(db);
+    const kickoffResult = await fixKickoffFormats(db);
     const profilesResult = await migrateProfiles(db);
     const legacyAdminResult = await deleteLegacyAdminDoc(db);
 
-    res.status(200).json({ ok: true, matches: matchesResult, profiles: profilesResult, legacyAdminDoc: legacyAdminResult });
+    res.status(200).json({ ok: true, matches: matchesResult, kickoffFormats: kickoffResult, profiles: profilesResult, legacyAdminDoc: legacyAdminResult });
   } catch (err) {
     res.status(500).json({ error: 'Error migrando datos', details: String(err) });
   }
