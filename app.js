@@ -737,15 +737,15 @@ function ensureAuth(){
       .sort(function(a,b){ return new Date(b.kickoff||0)-new Date(a.kickoff||0); });
 
     var html = '';
-    html += '<div class="section-title">Por jugar</div>';
+    if(live.length){
+      html += '<div class="section-title">🔴 En vivo</div>';
+      live.forEach(function(m){ html += matchCardHtml(m, false, 'live'); });
+    }
+    html += '<div class="section-title"'+(live.length?' style="margin-top:22px;"':'')+'>Por jugar</div>';
     if(!upcoming.length){
       html += '<div class="empty">No hay partidos abiertos para predecir.</div>';
     } else {
       upcoming.forEach(function(m){ html += matchCardHtml(m, true); });
-    }
-    if(live.length){
-      html += '<div class="section-title" style="margin-top:22px;">🔴 En vivo</div>';
-      live.forEach(function(m){ html += matchCardHtml(m, false, 'live'); });
     }
     if(lockedNoResult.length){
       html += '<div class="section-title" style="margin-top:22px;">Cerrados, esperando resultado</div>';
