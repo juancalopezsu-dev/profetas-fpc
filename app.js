@@ -247,9 +247,12 @@ function ensureAuth(){
       // api/live-updates.js (o api/actualizar-resultados.js) le haya puesto
       // aparte — ese campo es lo único que permite que Firestore le muestre
       // esta predicción a los demás una vez pasó el kickoff (ver firestore.rules).
+      var path = 'profetas/matches/matches/'+matchId+'/predictions/'+profileId;
+      console.log('[DEBUG savePrediction] guardando en:', path, { home: pred.home, away: pred.away, ownerUid: profileId });
       await setDoc(doc(db, 'profetas', 'matches', 'matches', matchId, 'predictions', profileId), {
         home: pred.home, away: pred.away, ownerUid: profileId
       }, { merge: true });
+      console.log('[DEBUG savePrediction] guardado OK en:', path);
     }catch(e){ console.error('save prediction error', matchId, profileId, e); alert('No se pudo guardar tu predicción. Revisa tu conexión.'); }
   }
   async function deletePrediction(matchId, profileId){
@@ -315,7 +318,7 @@ function ensureAuth(){
         if(first){ first = false; resolve(); }
         else if(onUpdate){ onUpdate(); }
       }, function(err){
-        console.error('watchCollectionGroup error', err);
+        console.error('[DEBUG watchCollectionGroup] la consulta falló — por eso "state.predictions" se queda vacío/desactualizado sin ningún aviso visible en la interfaz:', err);
         if(first){ first = false; resolve(); }
       });
       unsubscribers.push(unsub);
@@ -371,9 +374,11 @@ function ensureAuth(){
     // que es lo que le permite a Firestore comprobar que la consulta es
     // segura sin tener que mirar cada documento uno por uno.
     var myUid = auth.currentUser ? auth.currentUser.uid : '__none__';
+    console.log('[DEBUG loadAll] consultando collectionGroup(db,"predictions") con myUid =', myUid);
     var predictionsQuery = query(collectionGroup(db, 'predictions'),
       or(where('visible', '==', true), where('ownerUid', '==', myUid)));
     var predictionsPromise = watchCollectionGroup(predictionsQuery, function(map){
+      console.log('[DEBUG loadAll] predictions recibidas — matchIds:', Object.keys(map), 'detalle:', map);
       state.predictions = map;
     }, refreshCurrentView);
 
