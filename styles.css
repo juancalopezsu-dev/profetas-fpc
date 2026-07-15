@@ -70,7 +70,7 @@
   .brand{display:flex; align-items:center; gap:10px;}
   .brand-mark{
     width:34px;height:34px;border-radius:8px;
-    background:var(--gold);
+    background:var(--gold); object-fit:cover;
     display:flex;align-items:center;justify-content:center;
     color:var(--bg); font-family:'Oswald',sans-serif; font-weight:700; font-size:15px;
   }
