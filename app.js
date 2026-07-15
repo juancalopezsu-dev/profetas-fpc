@@ -1409,6 +1409,7 @@ function ensureAuth(){
         html += '<input type="number" min="0" style="width:44px;" data-live-away="'+m.id+'" value="'+(m.awayScore==null?0:m.awayScore)+'">';
         html += '<button class="btn" data-live-score="'+m.id+'">Actualizar marcador</button>';
         html += '<button class="btn btn-gold" data-finish-match="'+m.id+'">Finalizar partido</button>';
+        html += '<button class="btn btn-danger" data-del-match="'+m.id+'">Eliminar</button>';
         html += '<div style="width:100%;margin-top:8px;">';
         (m.goals||[]).forEach(function(g, idx){
           var t = g.team==='home'?home:away;
