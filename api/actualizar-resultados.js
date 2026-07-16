@@ -138,8 +138,18 @@ export default async function handler(req, res) {
 
     let predictionsRevealed = 0;
     for (const matchDoc of matchDocs) {
-      if (matchStatus(matchDoc.data()) !== 'scheduled') {
-        predictionsRevealed += await revealPredictions(matchDoc);
+      const m = matchDoc.data();
+      const st = matchStatus(m);
+      if (st === 'scheduled') continue;
+      // Mismo ahorro de lecturas que en api/live-updates.js: un partido
+      // 'finished' que ya tuvo una corrida completa no puede tener
+      // predicciones nuevas, así que no hace falta releer su subcolección
+      // en cada corrida (ver ese archivo para el diagnóstico completo del
+      // agotamiento de cuota del 2026-07-15).
+      if (st === 'finished' && m.predictionsFullyRevealed === true) continue;
+      predictionsRevealed += await revealPredictions(matchDoc);
+      if (st === 'finished') {
+        await matchDoc.ref.update({ predictionsFullyRevealed: true });
       }
     }
 

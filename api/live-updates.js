@@ -239,8 +239,23 @@ export default async function handler(req, res) {
       : matchesSnap;
     let predictionsRevealed = 0;
     for (const matchDoc of freshSnap.docs) {
-      if (matchStatusComputed(matchDoc.data()) !== 'scheduled') {
-        predictionsRevealed += await revealPredictions(matchDoc);
+      const m = matchDoc.data();
+      const computed = matchStatusComputed(m);
+      if (computed === 'scheduled') continue;
+      // Un partido 'finished' con predictionsFullyRevealed:true ya tuvo una
+      // corrida completa donde se revelaron todas sus predicciones — no
+      // puede aparecer ninguna nueva (el marcador y el status ya no
+      // cambian), así que releer su subcolección para siempre, cada minuto,
+      // es gasto de cuota de lectura sin ningún efecto. Esto fue lo que
+      // agotó la cuota gratis de Firestore el 2026-07-15 (ver evidencia real
+      // en el historial de este archivo): con decenas de partidos ya
+      // jugados y el cron corriendo cada 1-5 minutos las 24 horas, cada
+      // corrida releía TODAS las predicciones de TODOS los partidos
+      // terminados, para siempre, aunque no hubiera nada nuevo que revelar.
+      if (computed === 'finished' && m.predictionsFullyRevealed === true) continue;
+      predictionsRevealed += await revealPredictions(matchDoc);
+      if (computed === 'finished') {
+        await matchDoc.ref.update({ predictionsFullyRevealed: true });
       }
     }
 
