@@ -564,7 +564,15 @@ function ensureAuth(){
     var totals = {};
     state.profiles.forEach(function(p){ totals[p.id] = 0; });
     state.matches.forEach(function(m){
-      if(matchCompetition(m)!=='fpc') return;
+      // TEMPORAL (2026-07-18): se comentó el filtro de competencia para
+      // poder probar la tabla y los puntos en vivo con el partido de
+      // prueba del Mundial (Francia vs Inglaterra, 4pm). Antes de este
+      // cambio la tabla daba 0 puntos con toda razón — no había ningún bug,
+      // simplemente no había partidos FPC jugados todavía y este filtro
+      // los aislaba correctamente. HAY QUE DESCOMENTAR la línea de abajo
+      // después de la prueba de hoy: si se deja así, cualquier partido real
+      // de Mundial futuro también sumaría para siempre a la tabla del FPC.
+      // if(matchCompetition(m)!=='fpc') return;
       if(m.homeScore===null||m.homeScore===undefined) return;
       state.profiles.forEach(function(p){
         var eff = effectivePrediction(m, p.id);
@@ -897,25 +905,61 @@ function ensureAuth(){
       if(hasLiveMatches()){
         html += '<div class="live-banner"><span class="live-badge"><span class="live-dot"></span>EN VIVO</span> Hay partidos en curso — estos puntos son provisionales y pueden cambiar.</div>';
       }
+      // Si hay más de un partido en vivo a la vez (puede pasar en la última
+      // fecha del FPC), se destaca el que arrancó primero — es una decisión
+      // arbitraria pero razonable para un caso que hoy no se da (solo hay
+      // un partido de prueba en vivo).
+      var liveMatchesForTabla = state.matches.filter(function(m){ return matchStatus(m)==='live'; })
+        .sort(function(a,b){ return new Date(a.kickoff||0)-new Date(b.kickoff||0); });
+      var featuredLive = liveMatchesForTabla[0] || null;
+      var featuredHome = featuredLive ? teamById(featuredLive.homeTeamId) : null;
+      var featuredAway = featuredLive ? teamById(featuredLive.awayTeamId) : null;
+
       var rows = computeStandings();
       if(!rows.length){
         html += '<div class="empty">Todavía no hay jugadores.</div>';
       } else {
         html += '<div style="font-size:9px; color:var(--muted); display:flex; align-items:center; padding:0 14px; margin-bottom:4px; gap:12px;">';
         html += '<span style="width:28px;"></span><span style="width:38px;"></span><span style="flex:1;"></span>';
-        html += '<span style="width:52px;text-align:center;">Goleador</span><span style="width:28px;text-align:center;">Campeón</span><span style="width:60px;"></span>';
+        if(featuredLive){
+          html += '<span style="width:100px;text-align:center;" title="Predicción en vivo: '+escapeHtml(featuredHome?featuredHome.name:'?')+' vs '+escapeHtml(featuredAway?featuredAway.name:'?')+'">🔴 '+escapeHtml(featuredHome?featuredHome.code:'?')+'-'+escapeHtml(featuredAway?featuredAway.code:'?')+'</span>';
+        } else {
+          html += '<span style="width:52px;text-align:center;">Goleador</span><span style="width:42px;text-align:center;">Campeón</span>';
+        }
+        html += '<span style="width:60px;"></span>';
         html += '</div>';
         rows.forEach(function(r, i){
           var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
-          var pick = state.preseason.picks[r.profile.id];
-          var champT = pick ? teamById(pick.championTeamId) : null;
-          var scorerName = pick && pick.scorerName ? pick.scorerName : '';
           html += '<div class="board-row'+(i===0?' top1':'')+'" data-profile-detail="'+r.profile.id+'" style="cursor:pointer;">';
           html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
           html += avatarHtml(r.profile, 38);
           html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+escapeHtml(r.profile.name)+'</div>';
-          html += '<div style="width:52px;text-align:center;font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+escapeHtml(scorerName)+'">'+(scorerName ? escapeHtml(scorerName) : '-')+'</div>';
-          html += '<div style="width:28px;display:flex;justify-content:center;">'+(champT ? shieldHtml(champT,24) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
+          if(featuredLive){
+            var effLive = effectivePrediction(featuredLive, r.profile.id);
+            html += '<div style="width:100px;text-align:center;">';
+            if(effLive){
+              var liveCls = predictionPillClass(featuredLive, effLive.pred);
+              html += '<span class="mini-pill '+liveCls+'">'+escapeHtml(effLive.pred.home)+'-'+escapeHtml(effLive.pred.away)+'</span>';
+            } else {
+              html += '<span class="mini-pill pill-neutral">No predijo</span>';
+            }
+            html += '</div>';
+          } else {
+            var pick = state.preseason.picks[r.profile.id];
+            var champT = pick ? teamById(pick.championTeamId) : null;
+            var scorerName = pick && pick.scorerName ? pick.scorerName : '';
+            var res = state.preseason.result;
+            // Antes de que se cierre y califique la pre-temporada (ver
+            // Gestionar), se muestra dorado/neutro (pill-yellow) porque
+            // todavía no hay veredicto de acierto o error.
+            var scorerCls = 'pill-yellow', champCls = 'pill-yellow';
+            if(res){
+              scorerCls = (res.scorerCorrectIds||[]).indexOf(r.profile.id)>=0 ? 'pill-green' : 'pill-red';
+              champCls = (res.championTeamId && pick && pick.championTeamId===res.championTeamId) ? 'pill-green' : 'pill-red';
+            }
+            html += '<div style="width:52px;text-align:center;">'+(scorerName ? '<span class="mini-pill '+scorerCls+'" title="'+escapeHtml(scorerName)+'">'+escapeHtml(scorerName)+'</span>' : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
+            html += '<div style="width:42px;text-align:center;">'+(champT ? '<span class="mini-pill '+champCls+'">'+escapeHtml(champT.code)+'</span>' : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
+          }
           html += '<div style="width:60px;"><div class="board-points">'+r.points+'</div><span class="board-points-label">Puntos</span></div>';
           html += '</div>';
         });
