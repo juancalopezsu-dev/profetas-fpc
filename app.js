@@ -268,115 +268,44 @@ function ensureAuth(){
   }
 
   /* ---------- JUGADORES (ESPN) ---------- */
-  // La API de ESPN (site.api.espn.com) no pide llave y permite CORS desde
-  // cualquier origen (verificado a mano: header "access-control-allow-origin: *"
-  // en la respuesta real) — por eso esto se llama directo desde el navegador,
-  // sin necesidad de una función serverless como con API-Football.
-  //
-  // Se probó la respuesta real de las 20 planillas de la col.1 (564
-  // jugadores) antes de escribir este filtro: ESPN solo expone 4 posiciones
-  // para esta liga (Goalkeeper/Defender/Midfielder/Forward) — no existe un
-  // valor separado para "extremo" o "delantero por punta". Los extremos
-  // reales (ej. Yimmi Chará) vienen etiquetados como "Midfielder", igual que
-  // los volantes de marca/contención puros — ESPN no distingue eso para esta
-  // liga, y probar un filtro por estadísticas ofensivas (goles/remates) como
-  // alternativa tampoco separó limpiamente a unos de otros. Se decidió (con
-  // el usuario, 2026-07-18) incluir Forward + TODOS los Midfielder para no
-  // dejar a ningún extremo por fuera, aceptando que también entren algunos
-  // volantes de marca puros.
-  var ESPN_OFFENSIVE_POSITION_ABBRS = ['F', 'M'];
-
-  // Mismo criterio que teamNameMatches() en api/live-updates.js (ver ese
-  // archivo para el porqué) — ESPN a veces agrega sufijos al nombre del equipo.
-  function teamNameMatchesEspn(ourName, espnName){
-    var a = (ourName||'').toLowerCase().trim();
-    var b = (espnName||'').toLowerCase().trim();
-    if(!a || !b) return false;
-    if(a===b || b.indexOf(a)>=0 || a.indexOf(b)>=0) return true;
-    var aFirst = a.split(' ')[0];
-    return aFirst.length>3 && b.indexOf(aFirst)>=0;
-  }
-
+  // Esto llamaba directo desde el navegador a site.api.espn.com (esa API no
+  // pide llave), pero se comprobó con evidencia real que ESPN NO manda el
+  // header Access-Control-Allow-Origin en una solicitud fetch() real de
+  // navegador — un curl simple sin las cabeceras Sec-Fetch-* que cualquier
+  // navegador agrega solo (y que no se pueden quitar desde JS) sí lo recibía,
+  // lo que dio un falso positivo la primera vez que se probó. Se confirmó el
+  // bloqueo real con fetch(url,{mode:'no-cors'}) (la solicitud SÍ llega y
+  // responde, el navegador solo bloquea leer la respuesta) y repitiendo el
+  // curl con las cabeceras Sec-Fetch-Mode/Sec-Fetch-Site reales de un
+  // navegador (el header ACAO deja de aparecer). Por eso esto se movió a
+  // api/actualizar-jugadores.js — entre dos servidores no aplica CORS. Ver
+  // ese archivo para el filtro de posiciones (Forward + Midfielder) y el
+  // porqué.
   async function updatePlayersFromEspn(statusEl){
-    statusEl.innerHTML = '<span class="spinner"></span> Consultando equipos en ESPN...';
-    var espnTeams;
+    statusEl.innerHTML = '<span class="spinner"></span> Consultando ESPN y guardando jugadores...';
+    var idToken;
     try{
-      var teamsResp = await fetch('https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams');
-      var teamsJson = await teamsResp.json();
-      var league = teamsJson.sports && teamsJson.sports[0] && teamsJson.sports[0].leagues && teamsJson.sports[0].leagues[0];
-      espnTeams = league ? league.teams.map(function(t){ return t.team; }) : [];
+      idToken = await auth.currentUser.getIdToken();
     }catch(e){
-      statusEl.textContent = 'No se pudo consultar la lista de equipos de ESPN. Revisa tu conexión e inténtalo de nuevo.';
+      statusEl.textContent = 'No se pudo confirmar tu sesión de administrador. Vuelve a entrar e inténtalo de nuevo.';
       return;
     }
-    if(!espnTeams.length){
-      statusEl.textContent = 'ESPN no devolvió ningún equipo — inténtalo más tarde.';
-      return;
-    }
-
-    var fpcTeams = state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; });
-    var newPlayers = [];
-    var teamsNotFound = [];
-
-    for(var i=0;i<fpcTeams.length;i++){
-      var t = fpcTeams[i];
-      statusEl.innerHTML = '<span class="spinner"></span> Equipo '+(i+1)+'/'+fpcTeams.length+': '+escapeHtml(t.name)+'...';
-      var espnTeam = espnTeams.find(function(et){ return teamNameMatchesEspn(t.name, et.displayName); });
-      if(!espnTeam){ teamsNotFound.push(t.name); continue; }
-      try{
-        var rosterResp = await fetch('https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams/'+espnTeam.id+'/roster');
-        var rosterJson = await rosterResp.json();
-        var athletes = rosterJson.athletes || [];
-        athletes.forEach(function(a){
-          var abbr = a.position && a.position.abbreviation;
-          if(ESPN_OFFENSIVE_POSITION_ABBRS.indexOf(abbr) < 0) return;
-          newPlayers.push({
-            id: 'espn-'+a.id,
-            espnId: String(a.id),
-            name: a.displayName || a.fullName || '?',
-            teamId: t.id,
-            teamName: t.name,
-            position: abbr || null,
-            photoUrl: (a.headshot && a.headshot.href) ? a.headshot.href : null
-          });
-        });
-      }catch(e){ /* seguimos con los demás equipos */ }
-    }
-
-    statusEl.innerHTML = '<span class="spinner"></span> Guardando '+newPlayers.length+' jugadores...';
+    var resp, data;
     try{
-      // Se reemplaza la lista completa (se borran los que ya no salieron en
-      // esta corrida) para que un jugador que salió del equipo no se quede
-      // como opción para siempre — en 450 documentos por tanda, como en
-      // migrate-security.js, porque ese es el límite de un batch de Firestore.
-      var newIds = {};
-      newPlayers.forEach(function(p){ newIds[p.id] = true; });
-      var staleIds = state.players.filter(function(p){ return !newIds[p.id]; }).map(function(p){ return p.id; });
-
-      var ops = newPlayers.map(function(p){ return {type:'set', id:p.id, data:p}; })
-        .concat(staleIds.map(function(id){ return {type:'delete', id:id}; }));
-
-      var batch = writeBatch(db);
-      var opsInBatch = 0;
-      for(var j=0;j<ops.length;j++){
-        var op = ops[j];
-        if(op.type==='set'){ batch.set(doc(db, 'profetas', 'players', 'players', op.id), op.data); }
-        else { batch.delete(doc(db, 'profetas', 'players', 'players', op.id)); }
-        opsInBatch++;
-        if(opsInBatch>=450){
-          await batch.commit();
-          batch = writeBatch(db);
-          opsInBatch = 0;
-        }
-      }
-      if(opsInBatch>0){ await batch.commit(); }
+      resp = await fetch('/api/actualizar-jugadores', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer '+idToken }
+      });
+      data = await resp.json();
     }catch(e){
-      console.error('save players error', e);
-      statusEl.textContent = 'Se consultó ESPN pero falló al guardar en Firestore. Revisa tu conexión e inténtalo de nuevo.';
+      statusEl.textContent = 'No se pudo conectar con el servidor. Revisa tu conexión e inténtalo de nuevo.';
       return;
     }
-
-    statusEl.textContent = 'Listo: '+newPlayers.length+' jugadores ofensivos guardados de '+(fpcTeams.length-teamsNotFound.length)+'/'+fpcTeams.length+' equipos.'+(teamsNotFound.length ? ' No se encontraron en ESPN: '+teamsNotFound.join(', ')+'.' : '');
+    if(!resp.ok || data.error){
+      statusEl.textContent = 'Error: '+(data.error || ('HTTP '+resp.status))+(data.details ? ' ('+data.details+')' : '');
+      return;
+    }
+    statusEl.textContent = 'Listo: '+data.playersSaved+' jugadores ofensivos guardados de '+data.teamsMatched+'/'+data.teamsTotal+' equipos.'+((data.teamsNotFound&&data.teamsNotFound.length) ? ' No se encontraron en ESPN: '+data.teamsNotFound.join(', ')+'.' : '');
   }
 
   /* ---------- TIEMPO REAL ---------- */
