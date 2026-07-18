@@ -1185,6 +1185,10 @@ function ensureAuth(){
     html += '</div>';
 
     html += '<div class="card" style="max-width:360px;margin:0 auto;">';
+    html += '<button class="btn" id="ver-mis-predicciones-btn" style="width:100%;">Ver mis predicciones</button>';
+    html += '</div>';
+
+    html += '<div class="card" style="max-width:360px;margin:0 auto;">';
     html += '<button class="btn btn-danger" id="logout-btn" style="width:100%;">Cerrar sesión</button>';
     html += '<div style="font-size:11px;color:var(--muted);margin-top:8px;text-align:center;">Solo cierra tu sesión en este navegador. Tus predicciones y las de todos siguen guardadas.</div>';
     html += '</div>';
@@ -1253,6 +1257,10 @@ function ensureAuth(){
         alert('No se pudo guardar. Revisa tu conexión.');
         btn.disabled = false; btn.textContent = 'Guardar cambios';
       }
+    });
+
+    document.getElementById('ver-mis-predicciones-btn').addEventListener('click', function(){
+      showProfileDetailModal(state.myId);
     });
 
     document.getElementById('logout-btn').addEventListener('click', async function(){
@@ -1431,17 +1439,35 @@ function ensureAuth(){
       html += '<div class="card">';
       html += '<div class="section-title">Editar resultados ya cargados</div>';
       html += '<div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Úsalo si la Dimayor cambia un resultado por reglamento — los puntos de todos se recalculan solos.</div>';
-      finishedMatches.forEach(function(m){
+      function finishedRowHtml(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-        html += '<div class="team-list-item">';
-        html += '<div style="flex:1;font-size:13px;">'+(matchCompetition(m)==='mundial'?'🌎 ':'')+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
-        html += '<input type="number" min="0" style="width:44px;" data-edit-home="'+m.id+'" value="'+m.homeScore+'">';
-        html += '<span class="vs-label">-</span>';
-        html += '<input type="number" min="0" style="width:44px;" data-edit-away="'+m.id+'" value="'+m.awayScore+'">';
-        html += '<button class="btn" data-edit-result="'+m.id+'">Actualizar</button>';
-        html += '<button class="btn btn-danger" data-del-match="'+m.id+'">Eliminar</button>';
-        html += '</div>';
-      });
+        var row = '<div class="team-list-item">';
+        row += '<div style="flex:1;font-size:13px;">'+(matchCompetition(m)==='mundial'?'🌎 ':'')+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
+        row += '<input type="number" min="0" style="width:44px;" data-edit-home="'+m.id+'" value="'+m.homeScore+'">';
+        row += '<span class="vs-label">-</span>';
+        row += '<input type="number" min="0" style="width:44px;" data-edit-away="'+m.id+'" value="'+m.awayScore+'">';
+        row += '<button class="btn" data-edit-result="'+m.id+'">Actualizar</button>';
+        row += '<button class="btn btn-danger" data-del-match="'+m.id+'">Eliminar</button>';
+        row += '</div>';
+        return row;
+      }
+      // Solo cambia qué se dibuja en pantalla por defecto — no borra ni deja
+      // de leer nada de Firestore (state.matches ya trae todo). Los
+      // partidos finalizados hace más de 7 días quedan colapsados detrás de
+      // un botón para no renderizar decenas de filas de golpe cada vez que
+      // se abre Gestionar, que era lo que lo hacía sentir lento.
+      var sevenDaysAgoMs = Date.now() - 7*24*3600*1000;
+      var recentFinished = finishedMatches.filter(function(m){ return !m.kickoff || m.kickoff >= sevenDaysAgoMs; });
+      var olderFinished = finishedMatches.filter(function(m){ return m.kickoff && m.kickoff < sevenDaysAgoMs; });
+      recentFinished.forEach(function(m){ html += finishedRowHtml(m); });
+      if(olderFinished.length){
+        if(state.showOldFinishedMatches){
+          html += '<button class="btn" id="toggle-old-finished" style="margin:10px 0;">Ocultar partidos finalizados anteriores ▴</button>';
+          olderFinished.forEach(function(m){ html += finishedRowHtml(m); });
+        } else {
+          html += '<button class="btn" id="toggle-old-finished" style="margin:10px 0;">Ver partidos finalizados anteriores ▾ ('+olderFinished.length+')</button>';
+        }
+      }
       html += '</div>';
     }
 
@@ -1581,6 +1607,14 @@ function ensureAuth(){
       state.adminUnlocked = false;
       renderGestionarGate(el);
     });
+
+    var toggleOldFinishedBtn = document.getElementById('toggle-old-finished');
+    if(toggleOldFinishedBtn){
+      toggleOldFinishedBtn.addEventListener('click', function(){
+        state.showOldFinishedMatches = !state.showOldFinishedMatches;
+        renderGestionar(el);
+      });
+    }
 
     document.getElementById('copy-reminder-btn').addEventListener('click', function(){
       var txt = document.getElementById('reminder-text').textContent;
