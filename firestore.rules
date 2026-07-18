@@ -16,6 +16,16 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // Jugadores (para el selector de Goleador en Pre-temporada): mismo
+    // patrón que equipos. Se llenan desde el navegador con el botón
+    // "Actualizar jugadores" en Gestionar, que consulta la API de ESPN
+    // directamente (sin necesidad de una función serverless — esa API no
+    // pide llave y permite CORS, verificado a mano).
+    match /profetas/players/players/{playerId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
     // Perfiles: cualquiera autenticado puede leerlos (para el login, la
     // tabla, etc.). Solo se puede crear o editar el perfil propio — el uid
     // de la sesión (que solo se consigue probando el PIN correcto en

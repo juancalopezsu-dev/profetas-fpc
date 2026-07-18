@@ -56,6 +56,7 @@ function ensureAuth(){
   var state = {
     profiles: [],
     teams: [],
+    players: [],
     matches: [],
     predictions: {},
     preseason: { picks:{}, result:null },
@@ -225,6 +226,11 @@ function ensureAuth(){
   // documento con su propio ownerUid, para que las reglas de Firestore puedan
   // verificar por documento quién puede crearla o editarla (algo imposible si
   // todas las predicciones vivieran mezcladas en un array o mapa gigante).
+  // Jugadores ofensivos (para el selector de Goleador de pre-temporada):
+  // 'profetas/players/players/{playerId}', llenada desde ESPN por el botón
+  // "Actualizar jugadores" en Gestionar (ver updatePlayersFromEspn).
+  function playersCol(){ return collection(db, 'profetas', 'players', 'players'); }
+
   function matchesCol(){ return collection(db, 'profetas', 'matches', 'matches'); }
 
   async function saveMatch(match){
@@ -259,6 +265,118 @@ function ensureAuth(){
   async function deletePrediction(matchId, profileId){
     try{ await deleteDoc(doc(db, 'profetas', 'matches', 'matches', matchId, 'predictions', profileId)); }
     catch(e){ console.error('delete prediction error', matchId, profileId, e); }
+  }
+
+  /* ---------- JUGADORES (ESPN) ---------- */
+  // La API de ESPN (site.api.espn.com) no pide llave y permite CORS desde
+  // cualquier origen (verificado a mano: header "access-control-allow-origin: *"
+  // en la respuesta real) — por eso esto se llama directo desde el navegador,
+  // sin necesidad de una función serverless como con API-Football.
+  //
+  // Se probó la respuesta real de las 20 planillas de la col.1 (564
+  // jugadores) antes de escribir este filtro: ESPN solo expone 4 posiciones
+  // para esta liga (Goalkeeper/Defender/Midfielder/Forward) — no existe un
+  // valor separado para "extremo" o "delantero por punta". Los extremos
+  // reales (ej. Yimmi Chará) vienen etiquetados como "Midfielder", igual que
+  // los volantes de marca/contención puros — ESPN no distingue eso para esta
+  // liga, y probar un filtro por estadísticas ofensivas (goles/remates) como
+  // alternativa tampoco separó limpiamente a unos de otros. Se decidió (con
+  // el usuario, 2026-07-18) incluir Forward + TODOS los Midfielder para no
+  // dejar a ningún extremo por fuera, aceptando que también entren algunos
+  // volantes de marca puros.
+  var ESPN_OFFENSIVE_POSITION_ABBRS = ['F', 'M'];
+
+  // Mismo criterio que teamNameMatches() en api/live-updates.js (ver ese
+  // archivo para el porqué) — ESPN a veces agrega sufijos al nombre del equipo.
+  function teamNameMatchesEspn(ourName, espnName){
+    var a = (ourName||'').toLowerCase().trim();
+    var b = (espnName||'').toLowerCase().trim();
+    if(!a || !b) return false;
+    if(a===b || b.indexOf(a)>=0 || a.indexOf(b)>=0) return true;
+    var aFirst = a.split(' ')[0];
+    return aFirst.length>3 && b.indexOf(aFirst)>=0;
+  }
+
+  async function updatePlayersFromEspn(statusEl){
+    statusEl.innerHTML = '<span class="spinner"></span> Consultando equipos en ESPN...';
+    var espnTeams;
+    try{
+      var teamsResp = await fetch('https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams');
+      var teamsJson = await teamsResp.json();
+      var league = teamsJson.sports && teamsJson.sports[0] && teamsJson.sports[0].leagues && teamsJson.sports[0].leagues[0];
+      espnTeams = league ? league.teams.map(function(t){ return t.team; }) : [];
+    }catch(e){
+      statusEl.textContent = 'No se pudo consultar la lista de equipos de ESPN. Revisa tu conexión e inténtalo de nuevo.';
+      return;
+    }
+    if(!espnTeams.length){
+      statusEl.textContent = 'ESPN no devolvió ningún equipo — inténtalo más tarde.';
+      return;
+    }
+
+    var fpcTeams = state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; });
+    var newPlayers = [];
+    var teamsNotFound = [];
+
+    for(var i=0;i<fpcTeams.length;i++){
+      var t = fpcTeams[i];
+      statusEl.innerHTML = '<span class="spinner"></span> Equipo '+(i+1)+'/'+fpcTeams.length+': '+escapeHtml(t.name)+'...';
+      var espnTeam = espnTeams.find(function(et){ return teamNameMatchesEspn(t.name, et.displayName); });
+      if(!espnTeam){ teamsNotFound.push(t.name); continue; }
+      try{
+        var rosterResp = await fetch('https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams/'+espnTeam.id+'/roster');
+        var rosterJson = await rosterResp.json();
+        var athletes = rosterJson.athletes || [];
+        athletes.forEach(function(a){
+          var abbr = a.position && a.position.abbreviation;
+          if(ESPN_OFFENSIVE_POSITION_ABBRS.indexOf(abbr) < 0) return;
+          newPlayers.push({
+            id: 'espn-'+a.id,
+            espnId: String(a.id),
+            name: a.displayName || a.fullName || '?',
+            teamId: t.id,
+            teamName: t.name,
+            position: abbr || null,
+            photoUrl: (a.headshot && a.headshot.href) ? a.headshot.href : null
+          });
+        });
+      }catch(e){ /* seguimos con los demás equipos */ }
+    }
+
+    statusEl.innerHTML = '<span class="spinner"></span> Guardando '+newPlayers.length+' jugadores...';
+    try{
+      // Se reemplaza la lista completa (se borran los que ya no salieron en
+      // esta corrida) para que un jugador que salió del equipo no se quede
+      // como opción para siempre — en 450 documentos por tanda, como en
+      // migrate-security.js, porque ese es el límite de un batch de Firestore.
+      var newIds = {};
+      newPlayers.forEach(function(p){ newIds[p.id] = true; });
+      var staleIds = state.players.filter(function(p){ return !newIds[p.id]; }).map(function(p){ return p.id; });
+
+      var ops = newPlayers.map(function(p){ return {type:'set', id:p.id, data:p}; })
+        .concat(staleIds.map(function(id){ return {type:'delete', id:id}; }));
+
+      var batch = writeBatch(db);
+      var opsInBatch = 0;
+      for(var j=0;j<ops.length;j++){
+        var op = ops[j];
+        if(op.type==='set'){ batch.set(doc(db, 'profetas', 'players', 'players', op.id), op.data); }
+        else { batch.delete(doc(db, 'profetas', 'players', 'players', op.id)); }
+        opsInBatch++;
+        if(opsInBatch>=450){
+          await batch.commit();
+          batch = writeBatch(db);
+          opsInBatch = 0;
+        }
+      }
+      if(opsInBatch>0){ await batch.commit(); }
+    }catch(e){
+      console.error('save players error', e);
+      statusEl.textContent = 'Se consultó ESPN pero falló al guardar en Firestore. Revisa tu conexión e inténtalo de nuevo.';
+      return;
+    }
+
+    statusEl.textContent = 'Listo: '+newPlayers.length+' jugadores ofensivos guardados de '+(fpcTeams.length-teamsNotFound.length)+'/'+fpcTeams.length+' equipos.'+(teamsNotFound.length ? ' No se encontraron en ESPN: '+teamsNotFound.join(', ')+'.' : '');
   }
 
   /* ---------- TIEMPO REAL ---------- */
@@ -361,6 +479,10 @@ function ensureAuth(){
       state.teams = list;
     }, refreshCurrentView);
 
+    var playersPromise = watchCollection(playersCol(), function(list){
+      state.players = list;
+    }, refreshCurrentView);
+
     var matchesPromise = watchCollection(matchesCol(), function(list){
       state.matches = list;
     }, refreshCurrentView);
@@ -391,7 +513,7 @@ function ensureAuth(){
       state.realStandings = (data && data.data) || {};
     }, refreshCurrentView);
 
-    await Promise.all([profilesPromise, teamsPromise, matchesPromise, predictionsPromise, preseasonPromise, realStandingsPromise]);
+    await Promise.all([profilesPromise, teamsPromise, playersPromise, matchesPromise, predictionsPromise, preseasonPromise, realStandingsPromise]);
 
     if(!state.profiles.length){
       var legacyProfilesDoc = await loadDoc('profiles', null);
@@ -494,6 +616,16 @@ function ensureAuth(){
       return '<img class="avatar" src="'+escapeHtml(profile.photo)+'" style="width:'+size+'px;height:'+size+'px;">';
     }
     var initials = profile ? escapeHtml(profile.name.slice(0,2).toUpperCase()) : '?';
+    return '<div class="avatar-fallback" style="width:'+size+'px;height:'+size+'px;">'+initials+'</div>';
+  }
+
+  function playerAvatarHtml(player, size){
+    size = size || 30;
+    if(player && player.photoUrl){
+      return '<img class="avatar" src="'+escapeHtml(player.photoUrl)+'" style="width:'+size+'px;height:'+size+'px;">';
+    }
+    var words = player ? (player.name||'?').split(' ').filter(Boolean) : [];
+    var initials = words.length ? escapeHtml((words[0][0]+(words[1]?words[1][0]:'')).toUpperCase()) : '?';
     return '<div class="avatar-fallback" style="width:'+size+'px;height:'+size+'px;">'+initials+'</div>';
   }
 
@@ -1148,10 +1280,100 @@ function ensureAuth(){
     });
   }
 
+  /* ---------- SELECTOR DE JUGADORES (Goleador) ---------- */
+  // Reemplaza el campo de texto libre del Goleador de pre-temporada por un
+  // selector buscable, agrupado por equipo, con foto/iniciales — la lista
+  // sale de state.players ('profetas/players/players'), que llena el botón
+  // "Actualizar jugadores" en Gestionar consultando la API de ESPN (ver
+  // updatePlayersFromEspn). Cada llamador (renderPretemporada, el pronóstico
+  // del bot en Gestionar) guarda su propia variable local con el jugador
+  // elegido y la usa recién al guardar — el mismo patrón que pendingPhoto en
+  // "Mi perfil", para no perder el resto del formulario con cada selección.
+  function playerPickerHtml(prefix, selectedPlayer){
+    var html = '<div class="player-picker" id="'+prefix+'-picker">';
+    if(selectedPlayer){
+      html += '<div class="player-picker-selected" id="'+prefix+'-selected">';
+      html += playerAvatarHtml(selectedPlayer, 28);
+      html += '<span style="flex:1;font-size:13px;">'+escapeHtml(selectedPlayer.name)+' <span style="color:var(--muted);font-size:11px;">('+escapeHtml(selectedPlayer.teamName||'')+')</span></span>';
+      html += '<button type="button" class="btn" id="'+prefix+'-change" style="padding:4px 8px;font-size:11px;">Cambiar</button>';
+      html += '</div>';
+      html += '<div id="'+prefix+'-search-wrap" style="display:none;margin-top:8px;">';
+    } else {
+      html += '<div id="'+prefix+'-search-wrap">';
+    }
+    html += '<input type="text" id="'+prefix+'-search" placeholder="Buscar jugador por nombre o equipo..." autocomplete="off">';
+    html += '<div class="player-picker-list" id="'+prefix+'-list"></div>';
+    html += '</div></div>';
+    return html;
+  }
+
+  // onSelect(player) se llama al hacer clic en un jugador de la lista — cada
+  // llamador decide qué hacer con la selección (actualizar su variable local
+  // y volver a pintar el picker ya "cerrado", ver renderPretemporada).
+  function wirePlayerPicker(prefix, onSelect){
+    var searchInput = document.getElementById(prefix+'-search');
+    var listEl = document.getElementById(prefix+'-list');
+    if(!searchInput || !listEl) return;
+    var changeBtn = document.getElementById(prefix+'-change');
+    var selectedBox = document.getElementById(prefix+'-selected');
+    var searchWrap = document.getElementById(prefix+'-search-wrap');
+
+    function renderList(){
+      if(!state.players.length){
+        listEl.innerHTML = '<div class="empty" style="padding:10px 0;font-size:12px;">Todavía no hay jugadores cargados. Pídele al admin que use "Actualizar jugadores" en Gestionar.</div>';
+        return;
+      }
+      var q = (searchInput.value||'').toLowerCase().trim();
+      var filtered = state.players.filter(function(pl){
+        if(!q) return true;
+        return pl.name.toLowerCase().indexOf(q)>=0 || (pl.teamName||'').toLowerCase().indexOf(q)>=0;
+      });
+      if(!filtered.length){
+        listEl.innerHTML = '<div class="empty" style="padding:10px 0;font-size:12px;">No hay jugadores que coincidan.</div>';
+        return;
+      }
+      var byTeam = {};
+      filtered.forEach(function(pl){
+        var key = pl.teamName || 'Sin equipo';
+        if(!byTeam[key]) byTeam[key] = [];
+        byTeam[key].push(pl);
+      });
+      var listHtml = '';
+      Object.keys(byTeam).sort().forEach(function(tn){
+        listHtml += '<div class="player-picker-group-label">'+escapeHtml(tn)+'</div>';
+        byTeam[tn].sort(function(a,b){ return a.name.localeCompare(b.name); }).forEach(function(pl){
+          listHtml += '<div class="player-picker-row" data-pick-player="'+escapeHtml(pl.id)+'">'+playerAvatarHtml(pl,26)+'<span style="flex:1;font-size:13px;">'+escapeHtml(pl.name)+'</span></div>';
+        });
+      });
+      listEl.innerHTML = listHtml;
+      listEl.querySelectorAll('[data-pick-player]').forEach(function(row){
+        row.addEventListener('click', function(){
+          var pid = row.getAttribute('data-pick-player');
+          var player = state.players.find(function(pl){ return pl.id===pid; });
+          if(player) onSelect(player);
+        });
+      });
+    }
+
+    searchInput.addEventListener('input', renderList);
+    renderList();
+
+    if(changeBtn){
+      changeBtn.addEventListener('click', function(){
+        selectedBox.style.display = 'none';
+        searchWrap.style.display = '';
+        searchInput.value = '';
+        searchInput.focus();
+        renderList();
+      });
+    }
+  }
+
   /* ---------- PRETEMPORADA ---------- */
   function renderPretemporada(el){
     var locked = !!(state.preseason.picksLocked || (state.preseason.result && state.preseason.result.locked));
-    var myPick = state.preseason.picks[state.myId] || {championTeamId:'', scorerName:''};
+    var myPick = state.preseason.picks[state.myId] || {championTeamId:'', scorerName:'', scorerPlayerId:null};
+    var pendingScorerPlayer = myPick.scorerPlayerId ? state.players.find(function(pl){ return pl.id===myPick.scorerPlayerId; }) : null;
 
     var html = '<div class="card">';
     html += '<div class="section-title">Tu pronóstico antes de que arranque la liga</div>';
@@ -1163,7 +1385,11 @@ function ensureAuth(){
     });
     html += '</select></div>';
     html += '<div class="pick-row"><span class="pick-label">Goleador</span>';
-    html += '<input type="text" id="pick-scorer" placeholder="Nombre del jugador" value="'+escapeHtml(myPick.scorerName||'')+'" '+(locked?'disabled':'')+'>';
+    if(locked){
+      html += '<div style="font-size:13px;">'+escapeHtml(myPick.scorerName||'-')+'</div>';
+    } else {
+      html += playerPickerHtml('pick-scorer', pendingScorerPlayer);
+    }
     html += '</div>';
     if(!locked){
       html += '<button class="btn btn-gold" id="save-preseason">Guardar pronóstico (12 pts c/u si aciertas)</button>';
@@ -1194,14 +1420,26 @@ function ensureAuth(){
 
     el.innerHTML = html;
     if(!locked){
+      function handleScorerPick(player){
+        pendingScorerPlayer = player;
+        var pickerEl = document.getElementById('pick-scorer-picker');
+        pickerEl.outerHTML = playerPickerHtml('pick-scorer', pendingScorerPlayer);
+        wirePlayerPicker('pick-scorer', handleScorerPick);
+      }
+      wirePlayerPicker('pick-scorer', handleScorerPick);
+
       document.getElementById('save-preseason').addEventListener('click', async function(){
         var btn = this;
         var championTeamId = document.getElementById('pick-champion').value;
-        var scorerName = document.getElementById('pick-scorer').value.trim();
-        if(!championTeamId || !scorerName){ alert('Completa campeón y goleador'); return; }
+        if(!championTeamId || !pendingScorerPlayer){ alert('Completa campeón y goleador'); return; }
         btn.disabled = true;
         btn.textContent = 'Guardando...';
-        state.preseason.picks[state.myId] = { championTeamId:championTeamId, scorerName:scorerName };
+        state.preseason.picks[state.myId] = {
+          championTeamId: championTeamId,
+          scorerName: pendingScorerPlayer.name,
+          scorerPlayerId: pendingScorerPlayer.id,
+          scorerTeamId: pendingScorerPlayer.teamId
+        };
         await savePreseason();
         renderPretemporada(el);
       });
@@ -1428,6 +1666,7 @@ function ensureAuth(){
       .then(function(){ return fillMissingBotPredictions(); })
       .catch(function(e){ console.error('bot setup error', e); });
 
+    var pendingBotScorerPlayer = null; // se llena más abajo si el bot ya tenía un pick guardado
     var html = '';
 
     html += '<div style="display:flex;justify-content:flex-end;margin-bottom:10px;">';
@@ -1559,6 +1798,15 @@ function ensureAuth(){
     });
     html += '</div>';
 
+    html += '<div class="card">';
+    html += '<div class="section-title">Jugadores (para el selector de Goleador)</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Consulta la lista real de jugadores de cada equipo de la FPC en ESPN (delanteros y volantes — ver nota en el código sobre por qué se incluyen todos los volantes) y la guarda para que el Goleador de pre-temporada se elija de una lista en vez de escribirlo a mano. Jugadores cargados ahora: <b>'+state.players.length+'</b>.</div>';
+    html += '<div class="auto-fetch-row">';
+    html += '<button class="btn" id="update-players-btn">Actualizar jugadores (ESPN)</button>';
+    html += '<span id="update-players-status" style="font-size:11px;color:var(--muted);"></span>';
+    html += '</div>';
+    html += '</div>';
+
     var mundialTeamsGestionar = state.teams.filter(function(t){ return teamCompetition(t)==='mundial'; });
     if(mundialTeamsGestionar.length){
       html += '<div class="card">';
@@ -1614,14 +1862,15 @@ function ensureAuth(){
       html += '<div class="auto-fetch-row">';
       html += '<button class="btn" id="fill-bot-preds-btn">Generar predicciones faltantes de Carlos Antonio Vélez</button>';
       html += '</div>';
-      var botPick = state.preseason.picks[bot.id] || {championTeamId:'', scorerName:''};
+      var botPick = state.preseason.picks[bot.id] || {championTeamId:'', scorerName:'', scorerPlayerId:null};
+      pendingBotScorerPlayer = botPick.scorerPlayerId ? state.players.find(function(pl){ return pl.id===botPick.scorerPlayerId; }) : null;
       html += '<div class="form-row"><label>Campeón (pronóstico del bot)</label><select id="bot-champion">';
       html += '<option value="">Selecciona un equipo</option>';
       state.teams.filter(function(t){ return teamCompetition(t)==='fpc'; }).forEach(function(t){
         html += '<option value="'+t.id+'"'+(botPick.championTeamId===t.id?' selected':'')+'>'+escapeHtml(t.name)+'</option>';
       });
       html += '</select></div>';
-      html += '<div class="form-row"><label>Goleador (pronóstico del bot)</label><input type="text" id="bot-scorer" placeholder="Nombre del jugador" value="'+escapeHtml(botPick.scorerName||'')+'"></div>';
+      html += '<div class="form-row"><label>Goleador (pronóstico del bot)</label>'+playerPickerHtml('bot-scorer', pendingBotScorerPlayer)+'</div>';
       html += '<button class="btn btn-gold" id="save-bot-preseason-btn">Guardar pronóstico del bot</button>';
       html += '</div>';
     }
@@ -1769,6 +2018,14 @@ function ensureAuth(){
         }catch(e){ /* seguimos con las demás fechas */ }
       }
       statusEl.textContent = found ? ('Se encontraron '+found+' resultado(s). Revisa y dale Guardar.') : 'No se encontraron resultados nuevos todavía.';
+    });
+
+    document.getElementById('update-players-btn').addEventListener('click', async function(){
+      var btn = this;
+      var statusEl = document.getElementById('update-players-status');
+      btn.disabled = true;
+      try{ await updatePlayersFromEspn(statusEl); }
+      finally{ btn.disabled = false; }
     });
 
     el.querySelectorAll('[data-save-result]').forEach(function(btn){
@@ -2004,16 +2261,28 @@ function ensureAuth(){
 
     var saveBotPreseasonBtn = document.getElementById('save-bot-preseason-btn');
     if(saveBotPreseasonBtn){
+      function handleBotScorerPick(player){
+        pendingBotScorerPlayer = player;
+        var pickerEl = document.getElementById('bot-scorer-picker');
+        pickerEl.outerHTML = playerPickerHtml('bot-scorer', pendingBotScorerPlayer);
+        wirePlayerPicker('bot-scorer', handleBotScorerPick);
+      }
+      wirePlayerPicker('bot-scorer', handleBotScorerPick);
+
       saveBotPreseasonBtn.addEventListener('click', async function(){
         var btn = this;
         var championTeamId = document.getElementById('bot-champion').value;
-        var scorerName = document.getElementById('bot-scorer').value.trim();
-        if(!championTeamId || !scorerName){ alert('Completa campeón y goleador'); return; }
+        if(!championTeamId || !pendingBotScorerPlayer){ alert('Completa campeón y goleador'); return; }
         var bot = getBotProfile();
         if(!bot) return;
         btn.disabled = true;
         btn.textContent = 'Guardando...';
-        state.preseason.picks[bot.id] = { championTeamId:championTeamId, scorerName:scorerName };
+        state.preseason.picks[bot.id] = {
+          championTeamId: championTeamId,
+          scorerName: pendingBotScorerPlayer.name,
+          scorerPlayerId: pendingBotScorerPlayer.id,
+          scorerTeamId: pendingBotScorerPlayer.teamId
+        };
         await savePreseason();
         renderGestionar(el);
       });
