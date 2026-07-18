@@ -63,7 +63,8 @@ function ensureAuth(){
     adminUnlocked: false,
     myId: null,
     tab: 'predicciones',
-    tablaSub: 'apuesta'
+    tablaSub: 'apuesta',
+    finalizadosVisibleCount: 10
   };
 
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
@@ -689,6 +690,7 @@ function ensureAuth(){
   /* ---------- SHELL ---------- */
   var TABS = [
     {id:'predicciones', label:'Predicciones'},
+    {id:'finalizados', label:'Finalizados'},
     {id:'tabla', label:'Tabla'},
     {id:'pretemporada', label:'Pre-temporada'},
     {id:'reglas', label:'Reglas'},
@@ -715,6 +717,7 @@ function ensureAuth(){
   function renderView(){
     var el = document.getElementById('view');
     if(state.tab==='predicciones') return renderPredicciones(el);
+    if(state.tab==='finalizados') return renderFinalizados(el);
     if(state.tab==='tabla') return renderTabla(el);
     if(state.tab==='pretemporada') return renderPretemporada(el);
     if(state.tab==='reglas') return renderReglas(el);
@@ -733,8 +736,6 @@ function ensureAuth(){
       .sort(function(a,b){ return new Date(a.kickoff||0)-new Date(b.kickoff||0); });
     var live = state.matches.filter(function(m){ return matchStatus(m)==='live'; })
       .sort(function(a,b){ return new Date(a.kickoff||0)-new Date(b.kickoff||0); });
-    var finished = state.matches.filter(function(m){ return matchStatus(m)==='finished'; })
-      .sort(function(a,b){ return new Date(b.kickoff||0)-new Date(a.kickoff||0); });
 
     var html = '';
     if(live.length){
@@ -750,12 +751,6 @@ function ensureAuth(){
     if(lockedNoResult.length){
       html += '<div class="section-title" style="margin-top:22px;">Cerrados, esperando resultado</div>';
       lockedNoResult.forEach(function(m){ html += matchCardHtml(m, false, true); });
-    }
-    html += '<div class="section-title" style="margin-top:22px;">Finalizados</div>';
-    if(!finished.length){
-      html += '<div class="empty">Todavía no hay resultados cargados.</div>';
-    } else {
-      finished.forEach(function(m){ html += matchCardHtml(m, false); });
     }
     el.innerHTML = html;
 
@@ -781,6 +776,43 @@ function ensureAuth(){
         showMatchPredictionsModal(btn.getAttribute('data-show-match-preds'));
       });
     });
+  }
+
+  /* ---------- FINALIZADOS ---------- */
+  // Aparte de "Predicciones" para que esa pestaña cargue liviana — una
+  // temporada completa del FPC puede acumular muchísimos partidos jugados,
+  // así que aquí se pintan de a poco (state.finalizadosVisibleCount, que
+  // vive en el state global y no se resetea solo con re-renders normales
+  // por Firestore, solo crece con "Cargar más").
+  function renderFinalizados(el){
+    var finished = state.matches.filter(function(m){ return matchStatus(m)==='finished'; })
+      .sort(function(a,b){ return new Date(b.kickoff||0)-new Date(a.kickoff||0); });
+
+    var html = '<div class="section-title">Finalizados</div>';
+    if(!finished.length){
+      html += '<div class="empty">Todavía no hay resultados cargados.</div>';
+    } else {
+      var visibleCount = Math.min(state.finalizadosVisibleCount, finished.length);
+      finished.slice(0, visibleCount).forEach(function(m){ html += matchCardHtml(m, false); });
+      if(visibleCount < finished.length){
+        html += '<button class="btn" id="finalizados-load-more" style="width:100%;margin-top:10px;">Cargar más ('+(finished.length-visibleCount)+' restantes)</button>';
+      }
+    }
+    el.innerHTML = html;
+
+    el.querySelectorAll('[data-show-match-preds]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        showMatchPredictionsModal(btn.getAttribute('data-show-match-preds'));
+      });
+    });
+
+    var loadMoreBtn = document.getElementById('finalizados-load-more');
+    if(loadMoreBtn){
+      loadMoreBtn.addEventListener('click', function(){
+        state.finalizadosVisibleCount += 10;
+        renderFinalizados(el);
+      });
+    }
   }
 
   // Lista de goles (equipo + minuto) ordenada, usada tanto en la tarjeta de
