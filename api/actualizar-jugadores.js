@@ -58,6 +58,33 @@ function teamNameMatchesEspn(ourName, espnName) {
   return aFirst.length > 3 && b.indexOf(aFirst) >= 0;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Diagnosticado con evidencia real (2026-07-24): pedirle a ESPN 20 planillas
+// seguidas sin pausa hacía que algunas fallaran (probablemente límite de
+// tasa) — 5 de 20 equipos se quedaron con 0 jugadores guardados en una
+// corrida real, y el catch() vacío que había antes se lo tragaba en
+// silencio, sin que quedara ningún rastro de cuáles fallaron ni por qué. Se
+// confirmó que esos mismos 5 equipos responden perfecto al reintentar
+// segundos después — no es un problema de los datos de ESPN, es que hay que
+// tratar esta API como inestable bajo ráfagas y reintentar.
+async function fetchJsonWithRetry(url, attempts = 3, delayMs = 500) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return await resp.json();
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Método no permitido (usa POST).' });
@@ -94,20 +121,23 @@ export default async function handler(req, res) {
     const teamsSnap = await db.collection('profetas').doc('teams').collection('teams').get();
     const fpcTeams = teamsSnap.docs.map(d => d.data()).filter(t => t.competition !== 'mundial');
 
-    const teamsResp = await fetch('https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams');
-    const teamsJson = await teamsResp.json();
+    const teamsJson = await fetchJsonWithRetry('https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams');
     const league = teamsJson.sports && teamsJson.sports[0] && teamsJson.sports[0].leagues && teamsJson.sports[0].leagues[0];
     const espnTeams = league ? league.teams.map(t => t.team) : [];
 
     const newPlayers = [];
     const teamsNotFound = [];
+    // A diferencia de teamsNotFound (nombre que no calzó con ningún equipo
+    // de ESPN), esto son equipos que SÍ se encontraron pero cuya planilla
+    // falló incluso después de reintentar — antes esto se perdía en
+    // silencio (ver comentario de fetchJsonWithRetry arriba).
+    const teamFetchErrors = [];
 
     for (const t of fpcTeams) {
       const espnTeam = espnTeams.find(et => teamNameMatchesEspn(t.name, et.displayName));
       if (!espnTeam) { teamsNotFound.push(t.name); continue; }
       try {
-        const rosterResp = await fetch(`https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams/${espnTeam.id}/roster`);
-        const rosterJson = await rosterResp.json();
+        const rosterJson = await fetchJsonWithRetry(`https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams/${espnTeam.id}/roster`);
         const athletes = rosterJson.athletes || [];
         athletes.forEach(a => {
           const abbr = a.position && a.position.abbreviation;
@@ -122,7 +152,13 @@ export default async function handler(req, res) {
             photoUrl: (a.headshot && a.headshot.href) ? a.headshot.href : null
           });
         });
-      } catch (e) { /* seguimos con los demás equipos */ }
+      } catch (e) {
+        teamFetchErrors.push({ team: t.name, error: String(e) });
+      }
+      // Pausa corta entre equipos para no golpear a ESPN con 20 solicitudes
+      // seguidas de una — esa ráfaga fue justo lo que causó las fallas que
+      // se diagnosticaron el 2026-07-24.
+      await sleep(200);
     }
 
     // Se reemplaza la lista completa (se borran los que ya no salieron en
@@ -156,9 +192,10 @@ export default async function handler(req, res) {
     res.status(200).json({
       ok: true,
       playersSaved: newPlayers.length,
-      teamsMatched: fpcTeams.length - teamsNotFound.length,
+      teamsMatched: fpcTeams.length - teamsNotFound.length - teamFetchErrors.length,
       teamsTotal: fpcTeams.length,
-      teamsNotFound
+      teamsNotFound,
+      teamFetchErrors
     });
   } catch (err) {
     res.status(500).json({ error: 'Error actualizando jugadores', details: String(err) });

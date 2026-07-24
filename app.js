@@ -305,7 +305,10 @@ function ensureAuth(){
       statusEl.textContent = 'Error: '+(data.error || ('HTTP '+resp.status))+(data.details ? ' ('+data.details+')' : '');
       return;
     }
-    statusEl.textContent = 'Listo: '+data.playersSaved+' jugadores ofensivos guardados de '+data.teamsMatched+'/'+data.teamsTotal+' equipos.'+((data.teamsNotFound&&data.teamsNotFound.length) ? ' No se encontraron en ESPN: '+data.teamsNotFound.join(', ')+'.' : '');
+    var msg = 'Listo: '+data.playersSaved+' jugadores ofensivos guardados de '+data.teamsMatched+'/'+data.teamsTotal+' equipos.';
+    if(data.teamsNotFound && data.teamsNotFound.length){ msg += ' No se encontraron en ESPN: '+data.teamsNotFound.join(', ')+'.'; }
+    if(data.teamFetchErrors && data.teamFetchErrors.length){ msg += ' Fallaron incluso reintentando: '+data.teamFetchErrors.map(function(e){ return e.team; }).join(', ')+' — dale a "Actualizar jugadores" otra vez en un rato.'; }
+    statusEl.textContent = msg;
   }
 
   /* ---------- TIEMPO REAL ---------- */
