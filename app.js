@@ -1071,7 +1071,10 @@ function ensureAuth(){
             // partir del nombre guardado.
             var scorerPlayer = null;
             if(pick && pick.scorerPlayerId){
-              scorerPlayer = state.players.find(function(p){ return p.id==='bsd-'+pick.scorerPlayerId || p.bsdId===String(pick.scorerPlayerId); });
+              // scorerPlayerId es el id COMPLETO del jugador (ej. 'bsd-23854'),
+              // así se guarda desde el selector; se aceptan también variantes
+              // por si algún pronóstico viejo guardó el id sin prefijo.
+              scorerPlayer = state.players.find(function(p){ return p.id===pick.scorerPlayerId || p.id==='bsd-'+pick.scorerPlayerId || p.bsdId===String(pick.scorerPlayerId); });
             }
             if(!scorerPlayer && pick && pick.scorerName){ scorerPlayer = { name: pick.scorerName, photoUrl: null }; }
             html += '<div style="width:52px;display:flex;justify-content:center;" title="'+(pick&&pick.scorerName?escapeHtml(pick.scorerName):'')+'">'+(scorerPlayer ? playerAvatarHtml(scorerPlayer, 30) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
