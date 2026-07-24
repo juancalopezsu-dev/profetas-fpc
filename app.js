@@ -306,6 +306,7 @@ function ensureAuth(){
       return;
     }
     var msg = 'Listo: '+data.playersSaved+' jugadores ofensivos guardados de '+data.teamsMatched+'/'+data.teamsTotal+' equipos.';
+    if(data.ghostsFiltered && data.ghostsFiltered.length){ msg += ' Se descartaron '+data.ghostsFiltered.length+' registro(s) fantasma de ESPN (sin dorsal ni datos).'; }
     if(data.teamsNotFound && data.teamsNotFound.length){ msg += ' No se encontraron en ESPN: '+data.teamsNotFound.join(', ')+'.'; }
     if(data.teamFetchErrors && data.teamFetchErrors.length){ msg += ' Fallaron incluso reintentando: '+data.teamFetchErrors.map(function(e){ return e.team; }).join(', ')+' — dale a "Actualizar jugadores" otra vez en un rato.'; }
     statusEl.textContent = msg;

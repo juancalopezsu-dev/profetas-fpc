@@ -47,6 +47,23 @@ function getApp() {
 // también entren algunos volantes de marca puros.
 const OFFENSIVE_POSITION_ABBRS = ['F', 'M'];
 
+// Descarta los "registros fantasma" de ESPN. Diagnosticado con evidencia
+// real (2026-07-24): ESPN a veces tiene DOS registros para la misma persona
+// — ej. Hugo Rodallega existe como id 131212 (delantero, con dorsal, fecha
+// de nacimiento y estadísticas, en Santa Fe) Y como id 3097559 "Yon
+// Rodallega" (volante, SIN dorsal, SIN fecha de nacimiento, SIN
+// estadísticas, flotando en la nómina de Medellín). El segundo es un
+// duplicado corrupto. Se comprobó que en toda la liga hay 5 registros con
+// ese perfil vacío (sin dorsal NI fecha NI estadísticas). El usuario decidió
+// (2026-07-24) filtrarlos, asumiendo el riesgo pequeño de que 1 de esos 5
+// (Christian Negrete, Nacional) tenga un id de jugador normal y sea real con
+// perfil incompleto — para un selector de GOLEADOR el costo es casi nulo:
+// nadie sin dorsal, sin edad y sin un solo minuto registrado va a ser el
+// goleador del torneo.
+function isGhostRecord(a) {
+  return !a.dateOfBirth && !a.jersey && !a.statistics;
+}
+
 // Mismo criterio que teamNameMatches() en api/live-updates.js (ver ese
 // archivo para el porqué) — ESPN a veces agrega sufijos al nombre del equipo.
 function teamNameMatchesEspn(ourName, espnName) {
@@ -132,6 +149,7 @@ export default async function handler(req, res) {
     // falló incluso después de reintentar — antes esto se perdía en
     // silencio (ver comentario de fetchJsonWithRetry arriba).
     const teamFetchErrors = [];
+    const ghostsFiltered = []; // registros fantasma descartados (ver isGhostRecord)
 
     for (const t of fpcTeams) {
       const espnTeam = espnTeams.find(et => teamNameMatchesEspn(t.name, et.displayName));
@@ -142,6 +160,7 @@ export default async function handler(req, res) {
         athletes.forEach(a => {
           const abbr = a.position && a.position.abbreviation;
           if (OFFENSIVE_POSITION_ABBRS.indexOf(abbr) < 0) return;
+          if (isGhostRecord(a)) { ghostsFiltered.push(a.displayName + ' (' + t.name + ')'); return; }
           newPlayers.push({
             id: 'espn-' + a.id,
             espnId: String(a.id),
@@ -195,7 +214,8 @@ export default async function handler(req, res) {
       teamsMatched: fpcTeams.length - teamsNotFound.length - teamFetchErrors.length,
       teamsTotal: fpcTeams.length,
       teamsNotFound,
-      teamFetchErrors
+      teamFetchErrors,
+      ghostsFiltered
     });
   } catch (err) {
     res.status(500).json({ error: 'Error actualizando jugadores', details: String(err) });
