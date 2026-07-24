@@ -61,6 +61,19 @@ export default async function handler(req, res) {
       };
     }
 
+    // 4) Verificar las 3 nóminas dudosas antes de hardcodear sus IDs.
+    out.verifySquads = {};
+    for (const id of [1141, 1464, 1470]) {
+      const { httpStatus, body } = await getJson(`${HOST}/players/squads?team=${id}`);
+      const resp = body.response && body.response[0];
+      out.verifySquads[id] = {
+        httpStatus,
+        teamName: resp ? resp.team.name : null,
+        playerCount: resp ? resp.players.length : 0,
+        sample: resp ? resp.players.slice(0, 6).map(p => p.name + ' [' + p.position + ']') : []
+      };
+    }
+
     res.status(200).json(out);
   } catch (err) {
     res.status(500).json({ error: 'Error en el diagnóstico', details: String(err), partial: out });
