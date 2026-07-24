@@ -1928,7 +1928,7 @@ function ensureAuth(){
       html += '<div class="locked-note">Ya se cerró y se calificó la pre-temporada.</div>';
       html += '<button class="btn" id="reopen-preseason" style="margin-top:10px;">Reabrir pronósticos</button>';
     } else if(!picksLocked){
-      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Bloquea los pronósticos de campeón y goleador de todos para que nadie los siga cambiando. Hazlo cuando la liga esté por arrancar; después podrás calificar con el resultado real.</div>';
+      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Bloquea los pronósticos de campeón y goleador de todos para que nadie los siga cambiando. Hazlo cuando la liga esté por arrancar; después podrás calificar con el resultado real. <b>A quien no haya puesto nada se le copiará el pronóstico de Carlos Antonio Vélez</b> (guárdalo antes, más arriba).</div>';
       html += '<button class="btn btn-gold" id="lock-picks-btn">Cerrar predicciones de pre-temporada</button>';
     } else {
       html += '<div class="locked-note">Las predicciones ya están bloqueadas. Cuando sepas el resultado real, califica aquí.</div>';
@@ -2418,9 +2418,37 @@ function ensureAuth(){
     if(lockPicksBtn){
       lockPicksBtn.addEventListener('click', async function(){
         var btn = this;
-        if(!confirm('¿Bloquear las predicciones de pre-temporada? Nadie podrá cambiarlas después.')) return;
+        // A quien no haya puesto NADA (sin pronóstico o sin campeón elegido)
+        // se le copia el pronóstico del bot "Carlos Antonio Vélez" — SOLO a
+        // ellos; a quien sí predijo no se le toca. Es una escritura de admin,
+        // así que las reglas permiten editar los picks de otros (isAdmin()).
+        var botId = getBotProfileId();
+        var botPick = botId ? state.preseason.picks[botId] : null;
+        var humansMissing = state.profiles.filter(function(p){
+          if(p.isBot) return false;
+          var pk = state.preseason.picks[p.id];
+          return !pk || !pk.championTeamId;
+        });
+        if(humansMissing.length && (!botPick || !botPick.championTeamId || !botPick.scorerPlayerId)){
+          alert('Hay '+humansMissing.length+' persona(s) sin pronóstico de pre-temporada. Para copiarles el de Carlos Antonio Vélez, primero guarda el pronóstico del bot (más arriba, botón "Guardar pronóstico del bot") y vuelve a cerrar.');
+          return;
+        }
+        var msg = '¿Bloquear las predicciones de pre-temporada? Nadie podrá cambiarlas después.';
+        if(humansMissing.length){
+          msg += '\n\nA '+humansMissing.length+' persona(s) que no pusieron nada se les copiará el pronóstico de Carlos Antonio Vélez.';
+        }
+        if(!confirm(msg)) return;
         btn.disabled = true;
         btn.textContent = 'Bloqueando...';
+        humansMissing.forEach(function(p){
+          state.preseason.picks[p.id] = {
+            championTeamId: botPick.championTeamId,
+            scorerName: botPick.scorerName,
+            scorerPlayerId: botPick.scorerPlayerId,
+            scorerTeamId: botPick.scorerTeamId,
+            auto: true // se copió del bot al cerrar; se borra si se reabre
+          };
+        });
         state.preseason.picksLocked = true;
         await savePreseason();
         renderGestionar(el);
@@ -2452,6 +2480,11 @@ function ensureAuth(){
         if(!confirm('¿Reabrir los pronósticos de pre-temporada? Se perderá la calificación del goleador y todos podrán volver a editar su pronóstico.')) return;
         btn.disabled = true;
         btn.textContent = 'Reabriendo...';
+        // Quita los pronósticos que se copiaron automáticamente del bot al
+        // cerrar, para que esas personas queden en blanco otra vez.
+        Object.keys(state.preseason.picks).forEach(function(pid){
+          if(state.preseason.picks[pid] && state.preseason.picks[pid].auto) delete state.preseason.picks[pid];
+        });
         state.preseason.result = null;
         state.preseason.picksLocked = false;
         await savePreseason();
