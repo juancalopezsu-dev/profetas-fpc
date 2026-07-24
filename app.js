@@ -824,21 +824,31 @@ function ensureAuth(){
     }
     el.innerHTML = html;
 
-    el.querySelectorAll('[data-save-pred]').forEach(function(btn){
-      btn.addEventListener('click', async function(){
-        var mid = btn.getAttribute('data-save-pred');
-        var homeInput = el.querySelector('[data-pred-home="'+mid+'"]');
-        var awayInput = el.querySelector('[data-pred-away="'+mid+'"]');
+    // Auto-guardado: apenas el marcador esté completo (ambos números), se
+    // guarda solo al salir del campo (evento 'change'), sin botón. No se
+    // vuelve a pintar toda la pestaña para no perder el foco si sigues
+    // escribiendo; solo se muestra "✓ Guardado" en la tarjeta.
+    el.querySelectorAll('[data-pred-home]').forEach(function(homeInput){
+      var mid = homeInput.getAttribute('data-pred-home');
+      var awayInput = el.querySelector('[data-pred-away="'+mid+'"]');
+      var statusEl = el.querySelector('[data-pred-status="'+mid+'"]');
+      if(!awayInput) return;
+      async function trySave(){
         var h = homeInput.value, a = awayInput.value;
-        if(h===''||a===''){ alert('Completa ambos marcadores'); return; }
-        btn.disabled = true;
-        btn.textContent = 'Guardando...';
+        if(h===''||a===''){ return; } // todavía incompleto, no guarda
+        if(statusEl){ statusEl.textContent = 'Guardando…'; statusEl.style.color = 'var(--muted)'; }
         if(!state.predictions[mid]) state.predictions[mid] = {};
         var pred = { home:h, away:a, ownerUid: state.myId };
         state.predictions[mid][state.myId] = pred;
-        await savePrediction(mid, state.myId, pred);
-        renderPredicciones(el);
-      });
+        try{
+          await savePrediction(mid, state.myId, pred);
+          if(statusEl){ statusEl.textContent = '✓ Guardado'; statusEl.style.color = 'var(--success-text)'; }
+        }catch(e){
+          if(statusEl){ statusEl.textContent = 'No se pudo guardar — revisa tu conexión'; statusEl.style.color = 'var(--danger)'; }
+        }
+      }
+      homeInput.addEventListener('change', trySave);
+      awayInput.addEventListener('change', trySave);
     });
 
     el.querySelectorAll('[data-show-match-preds]').forEach(function(btn){
@@ -933,15 +943,19 @@ function ensureAuth(){
     if(isLive){ html += goalsListHtml(m, home, away); }
 
     if(editable){
-      html += '<div class="match-actions"><button class="btn btn-gold" data-save-pred="'+m.id+'">Guardar predicción</button></div>';
+      // Sin botón: el marcador se guarda solo al escribirlo (ver los listeners
+      // 'change' en renderPredicciones).
+      html += '<div class="match-actions"><span class="pred-save-status" data-pred-status="'+m.id+'">Escribe el marcador — se guarda solo.</span></div>';
     } else if(waitingResult === true){
+      // Cerrado, esperando resultado: el partido todavía NO ha empezado, así
+      // que NO se muestran las predicciones de los demás (sin "Ver
+      // predicciones") — solo se ve una vez el partido esté en vivo.
       var effW = effectivePrediction(m, state.myId);
       html += '<div class="match-actions"><span class="locked-tag">Predicción cerrada</span>';
       if(effW){
         var labelW = effW.auto ? ('🤖 Predicción automática (Carlos Antonio Vélez): '+escapeHtml(effW.pred.home)+'-'+escapeHtml(effW.pred.away)) : ('Tu predicción: '+escapeHtml(effW.pred.home)+'-'+escapeHtml(effW.pred.away));
         html += '<span class="points-pill">'+labelW+'</span>';
       }
-      html += '<button class="btn" data-show-match-preds="'+m.id+'">Ver predicciones</button>';
       html += '</div>';
     } else {
       var eff = effectivePrediction(m, state.myId);
@@ -1163,15 +1177,17 @@ function ensureAuth(){
     } else {
       predictedMatches.forEach(function(m){
         var home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-        // Las predicciones ajenas de partidos que todavía no arrancan quedan
-        // ocultas para que nadie pueda copiarse antes del pitazo inicial —
-        // las propias sí se muestran siempre, ya que uno ya sabe qué predijo.
-        var showScore = isLocked(m) || profileId === state.myId;
+        // Las predicciones (de cualquiera, incluida la propia) solo se ven
+        // una vez el partido YA EMPEZÓ (status en vivo o terminado) — nunca
+        // antes, ni siquiera las de uno mismo, para que esta vista no
+        // adelante nada antes del pitazo inicial. Tu propio marcador lo
+        // sigues viendo y editando en la pestaña Predicciones.
+        var showScore = matchStatus(m) !== 'scheduled';
         html += '<div class="team-list-item" style="flex-wrap:wrap;">';
         html += '<div style="width:100%;font-size:13px;">'+escapeHtml(home?home.name:'?')+' vs '+escapeHtml(away?away.name:'?')+'</div>';
         html += '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-top:4px;">';
         if(!showScore){
-          html += '<span>🔒 Oculto hasta que inicie el partido</span>';
+          html += '<span>🔒 Oculto hasta que empiece el partido</span>';
         } else {
           var eff = effectivePrediction(m, profileId);
           var pred = eff.pred;
