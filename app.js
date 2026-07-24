@@ -227,8 +227,8 @@ function ensureAuth(){
   // verificar por documento quién puede crearla o editarla (algo imposible si
   // todas las predicciones vivieran mezcladas en un array o mapa gigante).
   // Jugadores ofensivos (para el selector de Goleador de pre-temporada):
-  // 'profetas/players/players/{playerId}', llenada desde API-Football por el
-  // botón "Actualizar jugadores" en Gestionar (ver updatePlayersFromApiFootball).
+  // 'profetas/players/players/{playerId}', llenada desde BSD por el
+  // botón "Actualizar jugadores" en Gestionar (ver updatePlayersFromBSD).
   function playersCol(){ return collection(db, 'profetas', 'players', 'players'); }
 
   function matchesCol(){ return collection(db, 'profetas', 'matches', 'matches'); }
@@ -267,30 +267,12 @@ function ensureAuth(){
     catch(e){ console.error('delete prediction error', matchId, profileId, e); }
   }
 
-  /* ---------- JUGADORES (API-Football) ---------- */
-  // La fuente de jugadores es api/actualizar-jugadores.js, que consulta
-  // API-Football (nóminas completas, con foto y posición limpia — a
-  // diferencia de ESPN, ver el comentario de cabecera de ese archivo). El
-  // plan gratis limita a 10 peticiones/minuto, así que la función trabaja
-  // POR TANDAS: acá el navegador la llama en bucle (offset 0, 5, 10, ...),
-  // mostrando el progreso, hasta que responda done:true. Si algún equipo
-  // falla por el límite, al final se reintenta automáticamente (ver la
-  // segunda fase abajo) — antes esos equipos se quedaban por fuera en
-  // silencio. El proceso completo son un par de minutos: normal, es una
-  // acción de administrador que se hace rara vez.
-  function sleepMs(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
-
-  async function callUpdatePlayers(idToken, payload){
-    var resp = await fetch('/api/actualizar-jugadores', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer '+idToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    var data = await resp.json();
-    return { resp: resp, data: data };
-  }
-
-  async function updatePlayersFromApiFootball(statusEl){
+  /* ---------- JUGADORES (BSD) ---------- */
+  // La fuente de jugadores es api/actualizar-jugadores.js, que consulta BSD
+  // (sports.bzzoiro.com) — ver el comentario de cabecera de ese archivo. Como
+  // BSD no tiene límite de peticiones, se traen los 20 equipos en UNA sola
+  // llamada (nada de tandas ni reintentos). Tarda ~15-20s.
+  async function updatePlayersFromBSD(statusEl){
     var idToken;
     try{
       idToken = await auth.currentUser.getIdToken();
@@ -299,66 +281,27 @@ function ensureAuth(){
       return;
     }
 
-    var offset = 0;
-    var totalSaved = 0;
-    var failedTeams = [];
-    var unmapped = [];
-    var totalTeams = null;
-
-    // Fase 1: pasada normal, tanda por tanda.
-    while(true){
-      statusEl.innerHTML = '<span class="spinner"></span> Actualizando jugadores'+(totalTeams!==null ? ' — equipo '+Math.min(offset, totalTeams)+'/'+totalTeams : '')+'... (esto tarda un par de minutos, no cierres la app)';
-      var r;
-      try{
-        r = await callUpdatePlayers(idToken, { offset: offset });
-      }catch(e){
-        statusEl.textContent = 'Se cortó la conexión a mitad del proceso. Dale a "Actualizar jugadores" otra vez — vuelve a empezar desde cero.';
-        return;
-      }
-      if(!r.resp.ok || r.data.error){
-        statusEl.textContent = 'Error: '+(r.data.error || ('HTTP '+r.resp.status))+(r.data.details ? ' ('+r.data.details+')' : '');
-        return;
-      }
-      totalTeams = r.data.totalTeams;
-      totalSaved += (r.data.savedThisChunk || 0);
-      if(r.data.chunkErrors && r.data.chunkErrors.length){ failedTeams = failedTeams.concat(r.data.chunkErrors.map(function(e){ return e.team; })); }
-      if(r.data.unmappedTeams){ unmapped = r.data.unmappedTeams; }
-
-      statusEl.innerHTML = '<span class="spinner"></span> Actualizando jugadores — equipo '+r.data.processedSoFar+'/'+r.data.totalTeams+' ('+totalSaved+' guardados)... (no cierres la app)';
-
-      if(r.data.done) break;
-      offset = r.data.nextOffset;
+    statusEl.innerHTML = '<span class="spinner"></span> Trayendo las nóminas de los 20 equipos... (unos 15-20 segundos, no cierres la app)';
+    var resp, data;
+    try{
+      resp = await fetch('/api/actualizar-jugadores', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer '+idToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      data = await resp.json();
+    }catch(e){
+      statusEl.textContent = 'No se pudo conectar con el servidor. Revisa tu conexión e inténtalo de nuevo.';
+      return;
+    }
+    if(!resp.ok || data.error){
+      statusEl.textContent = 'Error: '+(data.error || ('HTTP '+resp.status))+(data.details ? ' ('+data.details+')' : '');
+      return;
     }
 
-    // Fase 2: reintentar los equipos que fallaron (por el límite de 10/min),
-    // en grupos de 5, hasta 2 rondas, esperando entre rondas a que el límite
-    // se recupere.
-    var round = 0;
-    while(failedTeams.length && round < 2){
-      round++;
-      statusEl.innerHTML = '<span class="spinner"></span> Reintentando equipos que fallaron ('+failedTeams.join(', ')+')... esperando a que se libere el límite de la API';
-      await sleepMs(15000);
-      var stillFailed = [];
-      for(var i=0; i<failedTeams.length; i+=5){
-        var batch = failedTeams.slice(i, i+5);
-        statusEl.innerHTML = '<span class="spinner"></span> Reintentando: '+batch.join(', ')+'...';
-        var rr;
-        try{
-          rr = await callUpdatePlayers(idToken, { retryTeams: batch });
-        }catch(e){
-          stillFailed = stillFailed.concat(batch);
-          continue;
-        }
-        if(!rr.resp.ok || rr.data.error){ stillFailed = stillFailed.concat(batch); continue; }
-        totalSaved += (rr.data.savedThisChunk || 0);
-        if(rr.data.chunkErrors && rr.data.chunkErrors.length){ stillFailed = stillFailed.concat(rr.data.chunkErrors.map(function(e){ return e.team; })); }
-      }
-      failedTeams = stillFailed;
-    }
-
-    var msg = 'Listo: '+totalSaved+' jugadores ofensivos guardados de '+totalTeams+' equipos.';
-    if(unmapped.length){ msg += ' Sin mapear (avísale al desarrollador para agregar su ID): '+unmapped.join(', ')+'.'; }
-    if(failedTeams.length){ msg += ' No se pudieron traer (dale otra vez a "Actualizar jugadores" en un minuto): '+failedTeams.join(', ')+'.'; }
+    var msg = 'Listo: '+data.playersSaved+' jugadores ofensivos guardados de '+data.teamsSucceeded+'/'+data.totalTeams+' equipos.';
+    if(data.unmappedTeams && data.unmappedTeams.length){ msg += ' Sin mapear (avísale al desarrollador para agregar su ID): '+data.unmappedTeams.join(', ')+'.'; }
+    if(data.failedTeams && data.failedTeams.length){ msg += ' Fallaron (dale otra vez a "Actualizar jugadores"): '+data.failedTeams.join(', ')+' — sus jugadores anteriores se conservaron.'; }
     statusEl.textContent = msg;
   }
 
@@ -604,12 +547,16 @@ function ensureAuth(){
 
   function playerAvatarHtml(player, size){
     size = size || 30;
-    if(player && player.photoUrl){
-      return '<img class="avatar" src="'+escapeHtml(player.photoUrl)+'" style="width:'+size+'px;height:'+size+'px;">';
-    }
     var words = player ? (player.name||'?').split(' ').filter(Boolean) : [];
     var initials = words.length ? escapeHtml((words[0][0]+(words[1]?words[1][0]:'')).toUpperCase()) : '?';
-    return '<div class="avatar-fallback" style="width:'+size+'px;height:'+size+'px;">'+initials+'</div>';
+    var fallback = '<div class="avatar-fallback" style="width:'+size+'px;height:'+size+'px;">'+initials+'</div>';
+    if(player && player.photoUrl){
+      // El proxy de fotos de BSD da 404 para el ~10% de jugadores sin foto;
+      // en ese caso onerror reemplaza el <img> roto por las iniciales.
+      return '<img class="avatar" src="'+escapeHtml(player.photoUrl)+'" style="width:'+size+'px;height:'+size+'px;" '+
+        'onerror="this.outerHTML='+escapeHtml(JSON.stringify(fallback))+'">';
+    }
+    return fallback;
   }
 
   function isLocked(match){
@@ -1267,8 +1214,8 @@ function ensureAuth(){
   // Reemplaza el campo de texto libre del Goleador de pre-temporada por un
   // selector buscable, agrupado por equipo, con foto/iniciales — la lista
   // sale de state.players ('profetas/players/players'), que llena el botón
-  // "Actualizar jugadores" en Gestionar consultando API-Football (ver
-  // updatePlayersFromApiFootball). Cada llamador (renderPretemporada, el pronóstico
+  // "Actualizar jugadores" en Gestionar consultando BSD (ver
+  // updatePlayersFromBSD). Cada llamador (renderPretemporada, el pronóstico
   // del bot en Gestionar) guarda su propia variable local con el jugador
   // elegido y la usa recién al guardar — el mismo patrón que pendingPhoto en
   // "Mi perfil", para no perder el resto del formulario con cada selección.
@@ -1783,7 +1730,7 @@ function ensureAuth(){
 
     html += '<div class="card">';
     html += '<div class="section-title">Jugadores (para el selector de Goleador)</div>';
-    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Consulta la lista real de jugadores de cada equipo de la FPC en API-Football (delanteros y volantes, con foto) y la guarda para que el Goleador de pre-temporada se elija de una lista en vez de escribirlo a mano. <b>Tarda un par de minutos</b> (la API gratis limita a 10 consultas por minuto, así que se hace por tandas) — no cierres la app mientras corre. Jugadores cargados ahora: <b>'+state.players.length+'</b>.</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Consulta la lista real de jugadores de cada equipo de la FPC en BSD (delanteros y volantes, con foto) y la guarda para que el Goleador de pre-temporada se elija de una lista en vez de escribirlo a mano. <b>Tarda unos 15-20 segundos</b> — no cierres la app mientras corre. Jugadores cargados ahora: <b>'+state.players.length+'</b>.</div>';
     html += '<div class="auto-fetch-row">';
     html += '<button class="btn" id="update-players-btn">Actualizar jugadores</button>';
     html += '<span id="update-players-status" style="font-size:11px;color:var(--muted);"></span>';
@@ -2007,7 +1954,7 @@ function ensureAuth(){
       var btn = this;
       var statusEl = document.getElementById('update-players-status');
       btn.disabled = true;
-      try{ await updatePlayersFromApiFootball(statusEl); }
+      try{ await updatePlayersFromBSD(statusEl); }
       finally{ btn.disabled = false; }
     });
 
