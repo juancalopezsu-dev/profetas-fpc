@@ -227,8 +227,8 @@ function ensureAuth(){
   // verificar por documento quién puede crearla o editarla (algo imposible si
   // todas las predicciones vivieran mezcladas en un array o mapa gigante).
   // Jugadores ofensivos (para el selector de Goleador de pre-temporada):
-  // 'profetas/players/players/{playerId}', llenada desde ESPN por el botón
-  // "Actualizar jugadores" en Gestionar (ver updatePlayersFromEspn).
+  // 'profetas/players/players/{playerId}', llenada desde API-Football por el
+  // botón "Actualizar jugadores" en Gestionar (ver updatePlayersFromApiFootball).
   function playersCol(){ return collection(db, 'profetas', 'players', 'players'); }
 
   function matchesCol(){ return collection(db, 'profetas', 'matches', 'matches'); }
@@ -267,22 +267,17 @@ function ensureAuth(){
     catch(e){ console.error('delete prediction error', matchId, profileId, e); }
   }
 
-  /* ---------- JUGADORES (ESPN) ---------- */
-  // Esto llamaba directo desde el navegador a site.api.espn.com (esa API no
-  // pide llave), pero se comprobó con evidencia real que ESPN NO manda el
-  // header Access-Control-Allow-Origin en una solicitud fetch() real de
-  // navegador — un curl simple sin las cabeceras Sec-Fetch-* que cualquier
-  // navegador agrega solo (y que no se pueden quitar desde JS) sí lo recibía,
-  // lo que dio un falso positivo la primera vez que se probó. Se confirmó el
-  // bloqueo real con fetch(url,{mode:'no-cors'}) (la solicitud SÍ llega y
-  // responde, el navegador solo bloquea leer la respuesta) y repitiendo el
-  // curl con las cabeceras Sec-Fetch-Mode/Sec-Fetch-Site reales de un
-  // navegador (el header ACAO deja de aparecer). Por eso esto se movió a
-  // api/actualizar-jugadores.js — entre dos servidores no aplica CORS. Ver
-  // ese archivo para el filtro de posiciones (Forward + Midfielder) y el
-  // porqué.
-  async function updatePlayersFromEspn(statusEl){
-    statusEl.innerHTML = '<span class="spinner"></span> Consultando ESPN y guardando jugadores...';
+  /* ---------- JUGADORES (API-Football) ---------- */
+  // La fuente de jugadores es api/actualizar-jugadores.js, que consulta
+  // API-Football (nóminas completas, con foto y posición limpia — a
+  // diferencia de ESPN, ver el comentario de cabecera de ese archivo). El
+  // plan gratis limita a 10 peticiones/minuto, así que la función trabaja
+  // POR TANDAS: acá el navegador la llama en bucle (offset 0, 6, 12, ...),
+  // mostrando el progreso, hasta que responda done:true. Cada tanda tarda
+  // ~45s (pausas de 7s entre equipos), así que el proceso completo son un
+  // par de minutos — normal, es una acción de administrador que se hace
+  // rara vez.
+  async function updatePlayersFromApiFootball(statusEl){
     var idToken;
     try{
       idToken = await auth.currentUser.getIdToken();
@@ -290,25 +285,45 @@ function ensureAuth(){
       statusEl.textContent = 'No se pudo confirmar tu sesión de administrador. Vuelve a entrar e inténtalo de nuevo.';
       return;
     }
-    var resp, data;
-    try{
-      resp = await fetch('/api/actualizar-jugadores', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer '+idToken }
-      });
-      data = await resp.json();
-    }catch(e){
-      statusEl.textContent = 'No se pudo conectar con el servidor. Revisa tu conexión e inténtalo de nuevo.';
-      return;
+
+    var offset = 0;
+    var totalSaved = 0;
+    var allErrors = [];
+    var unmapped = [];
+    var totalTeams = null;
+
+    while(true){
+      statusEl.innerHTML = '<span class="spinner"></span> Actualizando jugadores'+(totalTeams!==null ? ' — equipo '+Math.min(offset, totalTeams)+'/'+totalTeams : '')+'... (esto tarda un par de minutos, no cierres la app)';
+      var resp, data;
+      try{
+        resp = await fetch('/api/actualizar-jugadores', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer '+idToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ offset: offset })
+        });
+        data = await resp.json();
+      }catch(e){
+        statusEl.textContent = 'Se cortó la conexión a mitad del proceso (equipo '+offset+'). Dale a "Actualizar jugadores" otra vez — vuelve a empezar desde cero.';
+        return;
+      }
+      if(!resp.ok || data.error){
+        statusEl.textContent = 'Error: '+(data.error || ('HTTP '+resp.status))+(data.details ? ' ('+data.details+')' : '');
+        return;
+      }
+      totalTeams = data.totalTeams;
+      totalSaved += (data.savedThisChunk || 0);
+      if(data.chunkErrors && data.chunkErrors.length){ allErrors = allErrors.concat(data.chunkErrors.map(function(e){ return e.team; })); }
+      if(data.unmappedTeams){ unmapped = data.unmappedTeams; }
+
+      statusEl.innerHTML = '<span class="spinner"></span> Actualizando jugadores — equipo '+data.processedSoFar+'/'+data.totalTeams+' ('+totalSaved+' guardados)... (no cierres la app)';
+
+      if(data.done) break;
+      offset = data.nextOffset;
     }
-    if(!resp.ok || data.error){
-      statusEl.textContent = 'Error: '+(data.error || ('HTTP '+resp.status))+(data.details ? ' ('+data.details+')' : '');
-      return;
-    }
-    var msg = 'Listo: '+data.playersSaved+' jugadores ofensivos guardados de '+data.teamsMatched+'/'+data.teamsTotal+' equipos.';
-    if(data.ghostsFiltered && data.ghostsFiltered.length){ msg += ' Se descartaron '+data.ghostsFiltered.length+' registro(s) fantasma de ESPN (sin dorsal ni datos).'; }
-    if(data.teamsNotFound && data.teamsNotFound.length){ msg += ' No se encontraron en ESPN: '+data.teamsNotFound.join(', ')+'.'; }
-    if(data.teamFetchErrors && data.teamFetchErrors.length){ msg += ' Fallaron incluso reintentando: '+data.teamFetchErrors.map(function(e){ return e.team; }).join(', ')+' — dale a "Actualizar jugadores" otra vez en un rato.'; }
+
+    var msg = 'Listo: '+totalSaved+' jugadores ofensivos guardados de '+totalTeams+' equipos.';
+    if(unmapped.length){ msg += ' Sin mapear (avísale al desarrollador para agregar su ID): '+unmapped.join(', ')+'.'; }
+    if(allErrors.length){ msg += ' Fallaron (reintenta en un minuto): '+allErrors.join(', ')+'.'; }
     statusEl.textContent = msg;
   }
 
@@ -1217,8 +1232,8 @@ function ensureAuth(){
   // Reemplaza el campo de texto libre del Goleador de pre-temporada por un
   // selector buscable, agrupado por equipo, con foto/iniciales — la lista
   // sale de state.players ('profetas/players/players'), que llena el botón
-  // "Actualizar jugadores" en Gestionar consultando la API de ESPN (ver
-  // updatePlayersFromEspn). Cada llamador (renderPretemporada, el pronóstico
+  // "Actualizar jugadores" en Gestionar consultando API-Football (ver
+  // updatePlayersFromApiFootball). Cada llamador (renderPretemporada, el pronóstico
   // del bot en Gestionar) guarda su propia variable local con el jugador
   // elegido y la usa recién al guardar — el mismo patrón que pendingPhoto en
   // "Mi perfil", para no perder el resto del formulario con cada selección.
@@ -1733,9 +1748,9 @@ function ensureAuth(){
 
     html += '<div class="card">';
     html += '<div class="section-title">Jugadores (para el selector de Goleador)</div>';
-    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Consulta la lista real de jugadores de cada equipo de la FPC en ESPN (delanteros y volantes — ver nota en el código sobre por qué se incluyen todos los volantes) y la guarda para que el Goleador de pre-temporada se elija de una lista en vez de escribirlo a mano. Jugadores cargados ahora: <b>'+state.players.length+'</b>.</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Consulta la lista real de jugadores de cada equipo de la FPC en API-Football (delanteros y volantes, con foto) y la guarda para que el Goleador de pre-temporada se elija de una lista en vez de escribirlo a mano. <b>Tarda un par de minutos</b> (la API gratis limita a 10 consultas por minuto, así que se hace por tandas) — no cierres la app mientras corre. Jugadores cargados ahora: <b>'+state.players.length+'</b>.</div>';
     html += '<div class="auto-fetch-row">';
-    html += '<button class="btn" id="update-players-btn">Actualizar jugadores (ESPN)</button>';
+    html += '<button class="btn" id="update-players-btn">Actualizar jugadores</button>';
     html += '<span id="update-players-status" style="font-size:11px;color:var(--muted);"></span>';
     html += '</div>';
     html += '</div>';
@@ -1957,7 +1972,7 @@ function ensureAuth(){
       var btn = this;
       var statusEl = document.getElementById('update-players-status');
       btn.disabled = true;
-      try{ await updatePlayersFromEspn(statusEl); }
+      try{ await updatePlayersFromApiFootball(statusEl); }
       finally{ btn.disabled = false; }
     });
 

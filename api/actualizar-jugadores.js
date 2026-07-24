@@ -1,30 +1,78 @@
-// Función serverless que actualiza 'profetas/players/players' desde la API
-// de ESPN (para el selector de Goleador de pre-temporada).
+// Función serverless que actualiza 'profetas/players/players' desde API-Football
+// (para el selector de Goleador de pre-temporada).
 //
-// Esto empezó como una función 100% del lado del navegador (fetch directo a
-// site.api.espn.com desde app.js), pero se comprobó con evidencia real que
-// ESPN NO manda el header Access-Control-Allow-Origin en una solicitud
-// fetch() real de navegador — un curl simple sin las cabeceras Sec-Fetch-*
-// que cualquier navegador agrega solo (y que no se pueden quitar desde JS)
-// sí recibía ese header, lo cual dio un falso positivo la primera vez que
-// se probó. Se confirmó el bloqueo real de dos formas: con
-// fetch(url,{mode:'no-cors'}) la solicitud SÍ llega y responde (el
-// navegador solo bloquea leer la respuesta), y repitiendo el curl con las
-// cabeceras Sec-Fetch-Mode/Sec-Fetch-Site que un navegador real manda, el
-// header Access-Control-Allow-Origin deja de aparecer en la respuesta de
-// ESPN. Por eso esto se movió acá: entre dos servidores no aplica CORS.
+// POR QUÉ API-FOOTBALL Y NO ESPN (probado con evidencia real, 2026-07-24):
+// ESPN traía nóminas incompletas e inconsistentes para la col.1 (registros
+// fantasma como "Yon Rodallega", equipos que fallaban en silencio) y casi sin
+// fotos (solo ~8 jugadores en toda la liga tenían headshot). API-Football, en
+// cambio, devuelve nóminas completas y estables, con posición limpia
+// (Attacker/Midfielder/Defender/Goalkeeper) y URL de foto para TODOS los
+// jugadores (la mayoría reales; unos pocos con una silueta genérica). El
+// bloqueo anterior de API-Football era solo por TEMPORADA y solo en
+// fixtures/teams — el endpoint de nóminas (/players/squads?team=ID) NO
+// depende de temporada y funciona con el plan gratis.
 //
-// Protegida verificando el ID token de Firebase de quien llama — tiene que
-// traer el claim admin:true, el mismo que ya exigen las reglas de Firestore
-// para escribir en 'players' (ver isAdmin() en firestore.rules). Se manda
-// como "Authorization: Bearer <idToken>" desde app.js.
+// DOS RESTRICCIONES REALES DEL PLAN GRATIS (verificadas):
+//  1. /teams?league=239&season=X solo deja consultar 2022-2024 ("Free plans
+//     do not have access to this season"). Por eso NO se piden los IDs de
+//     equipo en vivo: se dejan fijos abajo (AF_TEAM_IDS), verificados uno por
+//     uno contra la nómina real de cada equipo.
+//  2. Límite de 10 peticiones por minuto. Como son 20 equipos (20 llamadas a
+//     squads), no caben en una sola invocación de Vercel (tope 60s en Hobby).
+//     Por eso esto trabaja POR TANDAS: el navegador llama con ?offset=0, luego
+//     offset=6, etc. (ver el bucle en app.js). Cada tanda procesa unos pocos
+//     equipos con pausa de 7s entre llamadas (para no pasar de 10/min) y
+//     escribe esos jugadores; en offset 0 primero borra la colección entera
+//     para no dejar jugadores viejos.
+//
+// Protegida verificando el ID token de Firebase de quien llama (claim
+// admin:true), igual que exige firestore.rules para escribir en 'players'.
 //
 // Variables de entorno necesarias en Vercel:
-//   - FIREBASE_SERVICE_ACCOUNT: JSON del service account de Firebase (como texto)
+//   - FIREBASE_SERVICE_ACCOUNT: JSON del service account de Firebase (texto)
+//   - API_FOOTBALL_KEY: la key de API-Football (ya configurada)
 
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
+
+// Vercel Hobby permite hasta 60s por función; lo pedimos explícito porque una
+// tanda con pausas de 7s puede acercarse a los 45s.
+export const config = { maxDuration: 60 };
+
+// IDs de equipo de API-Football, fijos y verificados el 2026-07-24 (cada uno
+// se comprobó pidiendo su nómina real). La clave es el nombre de NUESTRO
+// equipo normalizado (sin tildes, minúsculas). API-Football bloquea /teams
+// para 2025/2026 en el plan gratis, así que no se pueden pedir en vivo — pero
+// los IDs son estables entre temporadas. Si algún día cambia la liga (equipo
+// nuevo/ascendido), aparecerá en 'unmappedTeams' en la respuesta y hay que
+// agregar su ID aquí (se saca con /teams?search=<nombre>).
+const AF_TEAM_IDS = {
+  'millonarios': 1125,
+  'deportivo pasto': 1126,
+  'deportivo cali': 1127,
+  'independiente medellin': 1128,
+  'atletico bucaramanga': 1131,
+  'boyaca chico': 1132,
+  'jaguares de cordoba': 1133,
+  'internacional de bogota': 1134,
+  'junior': 1135,
+  'once caldas': 1136,
+  'atletico nacional': 1137,
+  'america de cali': 1138,
+  'independiente santa fe': 1139,
+  'alianza fc': 1141,
+  'deportes tolima': 1142,
+  'aguilas doradas': 1144,
+  'fortaleza ceif': 1147,
+  'deportivo pereira': 1462,
+  'llaneros': 1464,
+  'cucuta deportivo': 1470
+};
+
+const OFFENSIVE_POSITIONS = ['Attacker', 'Midfielder'];
+const CHUNK_SIZE = 5;      // equipos por tanda (5 * 7s = 35s, con margen bajo el tope de 60s de Vercel)
+const PACE_MS = 7000;      // pausa entre llamadas para no pasar de 10/min
 
 function getApp() {
   if (!getApps().length) {
@@ -34,188 +82,134 @@ function getApp() {
   return getApps()[0];
 }
 
-// ESPN solo expone 4 posiciones para la col.1: Goalkeeper/Defender/
-// Midfielder/Forward — no hay un valor separado para "extremo". Se probó la
-// respuesta real de las 20 planillas (564 jugadores) antes de decidir este
-// filtro: los extremos reales (ej. Yimmi Chará) vienen etiquetados como
-// Midfielder, igual que los volantes de marca/contención puros, y probar un
-// filtro por estadísticas ofensivas (goles/remates) como alternativa
-// tampoco los separó limpiamente (hay volantes de marca con tantos remates
-// como extremos, y titulares nuevos sin ninguna estadística todavía). Se
-// decidió con el usuario (2026-07-18) incluir Forward + TODOS los
-// Midfielder para no dejar a ningún extremo por fuera, aceptando que
-// también entren algunos volantes de marca puros.
-const OFFENSIVE_POSITION_ABBRS = ['F', 'M'];
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Descarta los "registros fantasma" de ESPN. Diagnosticado con evidencia
-// real (2026-07-24): ESPN a veces tiene DOS registros para la misma persona
-// — ej. Hugo Rodallega existe como id 131212 (delantero, con dorsal, fecha
-// de nacimiento y estadísticas, en Santa Fe) Y como id 3097559 "Yon
-// Rodallega" (volante, SIN dorsal, SIN fecha de nacimiento, SIN
-// estadísticas, flotando en la nómina de Medellín). El segundo es un
-// duplicado corrupto. Se comprobó que en toda la liga hay 5 registros con
-// ese perfil vacío (sin dorsal NI fecha NI estadísticas). El usuario decidió
-// (2026-07-24) filtrarlos, asumiendo el riesgo pequeño de que 1 de esos 5
-// (Christian Negrete, Nacional) tenga un id de jugador normal y sea real con
-// perfil incompleto — para un selector de GOLEADOR el costo es casi nulo:
-// nadie sin dorsal, sin edad y sin un solo minuto registrado va a ser el
-// goleador del torneo.
-function isGhostRecord(a) {
-  return !a.dateOfBirth && !a.jersey && !a.statistics;
+function normalizeTeamName(name) {
+  return (name || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quita tildes
+    .toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
-// Mismo criterio que teamNameMatches() en api/live-updates.js (ver ese
-// archivo para el porqué) — ESPN a veces agrega sufijos al nombre del equipo.
-function teamNameMatchesEspn(ourName, espnName) {
-  const a = (ourName || '').toLowerCase().trim();
-  const b = (espnName || '').toLowerCase().trim();
-  if (!a || !b) return false;
-  if (a === b || b.indexOf(a) >= 0 || a.indexOf(b) >= 0) return true;
-  const aFirst = a.split(' ')[0];
-  return aFirst.length > 3 && b.indexOf(aFirst) >= 0;
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Diagnosticado con evidencia real (2026-07-24): pedirle a ESPN 20 planillas
-// seguidas sin pausa hacía que algunas fallaran (probablemente límite de
-// tasa) — 5 de 20 equipos se quedaron con 0 jugadores guardados en una
-// corrida real, y el catch() vacío que había antes se lo tragaba en
-// silencio, sin que quedara ningún rastro de cuáles fallaron ni por qué. Se
-// confirmó que esos mismos 5 equipos responden perfecto al reintentar
-// segundos después — no es un problema de los datos de ESPN, es que hay que
-// tratar esta API como inestable bajo ráfagas y reintentar.
-async function fetchJsonWithRetry(url, attempts = 3, delayMs = 500) {
-  let lastErr;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return await resp.json();
-    } catch (e) {
-      lastErr = e;
-      if (i < attempts - 1) await sleep(delayMs);
-    }
+// Algunos nombres de API-Football vienen mal codificados (UTF-8 leído como
+// latin1), ej. "J. RamÃ­rez" en vez de "J. Ramírez". Solo intentamos
+// arreglarlo si el nombre trae la firma del problema (Ã/Â), para no dañar
+// los que ya están bien.
+function fixMojibake(name) {
+  if (!name || !/[ÃÂ]/.test(name)) return name;
+  try {
+    return Buffer.from(name, 'latin1').toString('utf8');
+  } catch (e) {
+    return name;
   }
-  throw lastErr;
+}
+
+async function fetchSquad(afId, apiKey) {
+  const url = `https://v3.football.api-sports.io/players/squads?team=${afId}`;
+  const r = await fetch(url, { headers: { 'x-apisports-key': apiKey } });
+  const body = await r.json();
+  if (body.errors && Object.keys(body.errors).length) {
+    throw new Error(JSON.stringify(body.errors));
+  }
+  const resp = body.response && body.response[0];
+  return resp ? resp.players : [];
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Método no permitido (usa POST).' });
-    return;
-  }
-  if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
-    res.status(500).json({ error: 'Falta configurar FIREBASE_SERVICE_ACCOUNT en Vercel.' });
-    return;
-  }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Método no permitido (usa POST).' }); return; }
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT) { res.status(500).json({ error: 'Falta configurar FIREBASE_SERVICE_ACCOUNT en Vercel.' }); return; }
+  if (!process.env.API_FOOTBALL_KEY) { res.status(500).json({ error: 'Falta configurar API_FOOTBALL_KEY en Vercel.' }); return; }
 
   try {
     getApp();
     const auth = getAuth();
-
     const authHeader = req.headers['authorization'] || '';
     const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-    if (!idToken) {
-      res.status(401).json({ error: 'Falta el token de sesión.' });
-      return;
-    }
+    if (!idToken) { res.status(401).json({ error: 'Falta el token de sesión.' }); return; }
     let decoded;
-    try {
-      decoded = await auth.verifyIdToken(idToken);
-    } catch (e) {
-      res.status(401).json({ error: 'Token inválido o vencido. Vuelve a entrar como administrador.' });
-      return;
-    }
-    if (decoded.admin !== true) {
-      res.status(403).json({ error: 'Esta acción es solo para administradores.' });
-      return;
-    }
+    try { decoded = await auth.verifyIdToken(idToken); }
+    catch (e) { res.status(401).json({ error: 'Token inválido o vencido. Vuelve a entrar como administrador.' }); return; }
+    if (decoded.admin !== true) { res.status(403).json({ error: 'Esta acción es solo para administradores.' }); return; }
 
+    const offset = Math.max(0, parseInt((req.body && req.body.offset) || 0, 10) || 0);
+    const apiKey = process.env.API_FOOTBALL_KEY;
     const db = getFirestore();
-    const teamsSnap = await db.collection('profetas').doc('teams').collection('teams').get();
-    const fpcTeams = teamsSnap.docs.map(d => d.data()).filter(t => t.competition !== 'mundial');
-
-    const teamsJson = await fetchJsonWithRetry('https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams');
-    const league = teamsJson.sports && teamsJson.sports[0] && teamsJson.sports[0].leagues && teamsJson.sports[0].leagues[0];
-    const espnTeams = league ? league.teams.map(t => t.team) : [];
-
-    const newPlayers = [];
-    const teamsNotFound = [];
-    // A diferencia de teamsNotFound (nombre que no calzó con ningún equipo
-    // de ESPN), esto son equipos que SÍ se encontraron pero cuya planilla
-    // falló incluso después de reintentar — antes esto se perdía en
-    // silencio (ver comentario de fetchJsonWithRetry arriba).
-    const teamFetchErrors = [];
-    const ghostsFiltered = []; // registros fantasma descartados (ver isGhostRecord)
-
-    for (const t of fpcTeams) {
-      const espnTeam = espnTeams.find(et => teamNameMatchesEspn(t.name, et.displayName));
-      if (!espnTeam) { teamsNotFound.push(t.name); continue; }
-      try {
-        const rosterJson = await fetchJsonWithRetry(`https://site.api.espn.com/apis/site/v2/sports/soccer/col.1/teams/${espnTeam.id}/roster`);
-        const athletes = rosterJson.athletes || [];
-        athletes.forEach(a => {
-          const abbr = a.position && a.position.abbreviation;
-          if (OFFENSIVE_POSITION_ABBRS.indexOf(abbr) < 0) return;
-          if (isGhostRecord(a)) { ghostsFiltered.push(a.displayName + ' (' + t.name + ')'); return; }
-          newPlayers.push({
-            id: 'espn-' + a.id,
-            espnId: String(a.id),
-            name: a.displayName || a.fullName || '?',
-            teamId: t.id,
-            teamName: t.name,
-            position: abbr || null,
-            photoUrl: (a.headshot && a.headshot.href) ? a.headshot.href : null
-          });
-        });
-      } catch (e) {
-        teamFetchErrors.push({ team: t.name, error: String(e) });
-      }
-      // Pausa corta entre equipos para no golpear a ESPN con 20 solicitudes
-      // seguidas de una — esa ráfaga fue justo lo que causó las fallas que
-      // se diagnosticaron el 2026-07-24.
-      await sleep(200);
-    }
-
-    // Se reemplaza la lista completa (se borran los que ya no salieron en
-    // esta corrida) para que un jugador que salió del equipo no se quede
-    // como opción para siempre.
-    const existingSnap = await db.collection('profetas').doc('players').collection('players').get();
-    const newIds = new Set(newPlayers.map(p => p.id));
-    const staleIds = existingSnap.docs.map(d => d.id).filter(id => !newIds.has(id));
-
-    let batch = db.batch();
-    let opsInBatch = 0;
-    async function commitIfFull() {
-      opsInBatch++;
-      if (opsInBatch >= 450) {
-        await batch.commit();
-        batch = db.batch();
-        opsInBatch = 0;
-      }
-    }
     const playersCol = db.collection('profetas').doc('players').collection('players');
-    for (const p of newPlayers) {
-      batch.set(playersCol.doc(p.id), p);
-      await commitIfFull();
+
+    // Lista ordenada y estable de NUESTROS equipos FPC mapeados a su ID de
+    // API-Football. El orden (por nombre) tiene que ser el mismo en cada
+    // tanda para que 'offset' siempre apunte al mismo equipo.
+    const teamsSnap = await db.collection('profetas').doc('teams').collection('teams').get();
+    const fpcTeams = teamsSnap.docs.map(d => d.data())
+      .filter(t => t.competition !== 'mundial')
+      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+    const mapped = [];
+    const unmappedTeams = [];
+    for (const t of fpcTeams) {
+      const afId = AF_TEAM_IDS[normalizeTeamName(t.name)];
+      if (afId) mapped.push({ teamId: t.id, teamName: t.name, afId });
+      else unmappedTeams.push(t.name);
     }
-    for (const id of staleIds) {
-      batch.delete(playersCol.doc(id));
-      await commitIfFull();
+
+    // En la primera tanda, borrar la colección entera para no dejar jugadores
+    // viejos (ej. de la fuente ESPN anterior o de un equipo que ya no está).
+    if (offset === 0) {
+      const existing = await playersCol.get();
+      let delBatch = db.batch(); let n = 0;
+      for (const doc of existing.docs) {
+        delBatch.delete(doc.ref); n++;
+        if (n >= 450) { await delBatch.commit(); delBatch = db.batch(); n = 0; }
+      }
+      if (n > 0) await delBatch.commit();
     }
-    if (opsInBatch > 0) await batch.commit();
+
+    const slice = mapped.slice(offset, offset + CHUNK_SIZE);
+    let savedThisChunk = 0;
+    const chunkErrors = [];
+    let batch = db.batch(); let ops = 0;
+    async function commitIfFull() { ops++; if (ops >= 450) { await batch.commit(); batch = db.batch(); ops = 0; } }
+
+    for (const m of slice) {
+      // Pausa ANTES de cada llamada (incluida la primera de la tanda) para
+      // garantizar el espaciado de 7s también entre tandas consecutivas.
+      await sleep(PACE_MS);
+      let players;
+      try {
+        players = await fetchSquad(m.afId, apiKey);
+      } catch (e) {
+        chunkErrors.push({ team: m.teamName, error: String(e) });
+        continue;
+      }
+      for (const p of players) {
+        if (OFFENSIVE_POSITIONS.indexOf(p.position) < 0) continue;
+        batch.set(playersCol.doc('af-' + p.id), {
+          id: 'af-' + p.id,
+          apiFootballId: String(p.id),
+          name: fixMojibake(p.name) || '?',
+          teamId: m.teamId,
+          teamName: m.teamName,
+          position: p.position,
+          number: (p.number == null ? null : p.number),
+          photoUrl: p.photo || null
+        });
+        savedThisChunk++;
+        await commitIfFull();
+      }
+    }
+    if (ops > 0) await batch.commit();
+
+    const nextOffset = offset + CHUNK_SIZE;
+    const done = nextOffset >= mapped.length;
 
     res.status(200).json({
       ok: true,
-      playersSaved: newPlayers.length,
-      teamsMatched: fpcTeams.length - teamsNotFound.length - teamFetchErrors.length,
-      teamsTotal: fpcTeams.length,
-      teamsNotFound,
-      teamFetchErrors,
-      ghostsFiltered
+      done,
+      nextOffset: done ? null : nextOffset,
+      totalTeams: mapped.length,
+      processedSoFar: Math.min(nextOffset, mapped.length),
+      savedThisChunk,
+      unmappedTeams,
+      chunkErrors
     });
   } catch (err) {
     res.status(500).json({ error: 'Error actualizando jugadores', details: String(err) });
