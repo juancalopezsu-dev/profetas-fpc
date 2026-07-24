@@ -256,6 +256,20 @@
     background:rgba(193,68,59,0.12); border:1px solid rgba(193,68,59,0.3); border-radius:10px;
     padding:8px 12px; margin-bottom:12px;
   }
+  /* Franja del marcador del partido en vivo, arriba de "Nuestra apuesta" */
+  .live-scoreboard{
+    display:flex; align-items:center; justify-content:center; gap:12px;
+    background:var(--panel); border:1px solid var(--gold); border-radius:12px;
+    padding:12px 14px; margin-bottom:8px;
+  }
+  .live-scoreboard .lsb-team{
+    display:flex; flex-direction:column; align-items:center; gap:5px; flex:1;
+    font-size:12px; color:var(--white); text-align:center; min-width:0;
+  }
+  .live-scoreboard .lsb-score{
+    font-family:'Oswald',sans-serif; font-size:26px; font-weight:700;
+    color:var(--gold); white-space:nowrap;
+  }
   .goals-list, .goal-row{font-size:12px; color:var(--muted);}
   .goals-list{margin-top:4px;}
   .goal-row{display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line);}

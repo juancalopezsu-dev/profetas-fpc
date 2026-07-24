@@ -1020,9 +1020,6 @@ function ensureAuth(){
     if(state.tablaSub==='goleo'){
       html += renderGoleoHtml();
     } else if(state.tablaSub==='apuesta'){
-      if(hasLiveMatches()){
-        html += '<div class="live-banner"><span class="live-badge"><span class="live-dot"></span>EN VIVO</span> Hay partidos en curso — estos puntos son provisionales y pueden cambiar.</div>';
-      }
       // Si hay más de un partido en vivo a la vez (puede pasar en la última
       // fecha del FPC), se destaca el que arrancó primero — es una decisión
       // arbitraria pero razonable para un caso que hoy no se da (solo hay
@@ -1033,6 +1030,19 @@ function ensureAuth(){
       var featuredHome = featuredLive ? teamById(featuredLive.homeTeamId) : null;
       var featuredAway = featuredLive ? teamById(featuredLive.awayTeamId) : null;
 
+      // Franja con el marcador del partido en vivo, arriba de la tabla, para
+      // que se vea de qué partido son las predicciones de abajo.
+      if(featuredLive){
+        var lh = featuredLive.homeScore==null?0:featuredLive.homeScore;
+        var la = featuredLive.awayScore==null?0:featuredLive.awayScore;
+        html += '<div class="live-scoreboard">';
+        html += '<div class="lsb-team">'+shieldHtml(featuredHome,34)+'<span>'+escapeHtml(featuredHome?featuredHome.name:'?')+'</span></div>';
+        html += '<div class="lsb-score">'+lh+' <span style="color:var(--muted);font-weight:400;">-</span> '+la+'</div>';
+        html += '<div class="lsb-team">'+shieldHtml(featuredAway,34)+'<span>'+escapeHtml(featuredAway?featuredAway.name:'?')+'</span></div>';
+        html += '</div>';
+        html += '<div class="live-banner"><span class="live-badge"><span class="live-dot"></span>EN VIVO</span> Las predicciones de abajo son de este partido — los puntos son provisionales.</div>';
+      }
+
       var rows = computeStandings();
       if(!rows.length){
         html += '<div class="empty">Todavía no hay jugadores.</div>';
@@ -1040,7 +1050,7 @@ function ensureAuth(){
         html += '<div style="font-size:9px; color:var(--muted); display:flex; align-items:center; padding:0 14px; margin-bottom:4px; gap:12px;">';
         html += '<span style="width:28px;"></span><span style="width:38px;"></span><span style="flex:1;"></span>';
         if(featuredLive){
-          html += '<span style="width:100px;text-align:center;" title="Predicción en vivo: '+escapeHtml(featuredHome?featuredHome.name:'?')+' vs '+escapeHtml(featuredAway?featuredAway.name:'?')+'">🔴 '+escapeHtml(featuredHome?featuredHome.code:'?')+'-'+escapeHtml(featuredAway?featuredAway.code:'?')+'</span>';
+          html += '<span style="width:64px;text-align:center;">Predicción</span><span style="width:48px;text-align:center;">Puntos</span>';
         } else {
           html += '<span style="width:52px;text-align:center;">Goleador</span><span style="width:42px;text-align:center;">Campeón</span>';
         }
@@ -1053,15 +1063,20 @@ function ensureAuth(){
           html += avatarHtml(r.profile, 38);
           html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+escapeHtml(r.profile.name)+'</div>';
           if(featuredLive){
+            // Durante el partido en vivo: la predicción de esa persona para
+            // ESTE partido (pastilla de color según cómo va) y, en columna
+            // aparte y con el mismo color, los puntos que ganaría si el
+            // partido terminara con el marcador actual.
             var effLive = effectivePrediction(featuredLive, r.profile.id);
-            html += '<div style="width:100px;text-align:center;">';
             if(effLive){
               var liveCls = predictionPillClass(featuredLive, effLive.pred);
-              html += '<span class="mini-pill '+liveCls+'">'+escapeHtml(effLive.pred.home)+'-'+escapeHtml(effLive.pred.away)+'</span>';
+              var livePts = pointsForPrediction(featuredLive, effLive.pred);
+              html += '<div style="width:64px;text-align:center;"><span class="mini-pill '+liveCls+'">'+escapeHtml(effLive.pred.home)+'-'+escapeHtml(effLive.pred.away)+'</span></div>';
+              html += '<div style="width:48px;text-align:center;"><span class="mini-pill '+liveCls+'">'+livePts+'</span></div>';
             } else {
-              html += '<span class="mini-pill pill-neutral">No predijo</span>';
+              html += '<div style="width:64px;text-align:center;"><span class="mini-pill pill-neutral">No predijo</span></div>';
+              html += '<div style="width:48px;text-align:center;"><span class="mini-pill pill-neutral">0</span></div>';
             }
-            html += '</div>';
           } else {
             var pick = state.preseason.picks[r.profile.id];
             var champT = pick ? teamById(pick.championTeamId) : null;
