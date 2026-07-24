@@ -11,15 +11,11 @@ export default async function handler(req, res) {
     catch (e) { return { status: r.status, body: { _raw: t.slice(0, 200) } }; }
   }
   try {
-    // Traer una página de partidos de la liga 80 y ver los status reales
-    const all = await getJson('https://sports.bzzoiro.com/api/matches/?league=80&page_size=60&tz=America/Bogota');
-    const results = all.body.results || [];
-    const statuses = {};
-    results.forEach(e => { statuses[e.status] = (statuses[e.status] || 0) + 1; });
-    out.statusCounts = statuses;
-    out.totalCount = all.body.count;
-
-    // Encontrar un partido con marcador > 0 (ya jugado) y pedir su detalle full
+    // Partidos YA JUGADOS de la Primera A (semestre pasado) por rango de fecha
+    const past = await getJson('https://sports.bzzoiro.com/api/matches/?league=80&date_from=2026-05-01&date_to=2026-06-30&page_size=40&tz=America/Bogota');
+    const results = past.body.results || [];
+    out.pastCount = past.body.count;
+    out.pastReturned = results.length;
     const played = results.filter(e => (e.home_score || 0) + (e.away_score || 0) > 0);
     out.playedFound = played.length;
     if (played.length) {
@@ -27,7 +23,6 @@ export default async function handler(req, res) {
       out.pickedMatch = { id: e0.id, date: e0.event_date, status: e0.status, home: e0.home_team, away: e0.away_team, score: e0.home_score + '-' + e0.away_score };
       const det = await getJson('https://sports.bzzoiro.com/api/matches/' + e0.id + '/?full=true&tz=America/Bogota');
       const b = det.body || {};
-      out.detailKeys = Object.keys(b);
       out.incidents = b.incidents || null;
     }
     res.status(200).json(out);
