@@ -86,9 +86,13 @@ export default async function handler(req, res) {
     teamsSnap.docs.map(d => d.data()).filter(t => t.competition !== 'mundial')
       .forEach(t => { ourTeamsByNorm[norm(t.name)] = t; });
 
-    // Partidos que ya existen (para no duplicar).
+    // Partidos que ya existen (para no duplicar). Se deduplica por el id del
+    // documento Y por el bsdMatchId ya guardado — porque un partido pudo
+    // haberse creado antes a mano (id aleatorio) y luego live-updates.js le
+    // emparejó su bsdMatchId; en ese caso NO hay que volver a crearlo.
     const existingSnap = await matchesCol.get();
     const existingIds = new Set(existingSnap.docs.map(d => d.id));
+    const existingBsdIds = new Set(existingSnap.docs.map(d => d.data().bsdMatchId).filter(Boolean).map(String));
 
     // Fixtures próximos de BSD.
     const url = 'https://sports.bzzoiro.com/api/matches/?league=80&status=notstarted&tz=America/Bogota&page_size=50';
@@ -104,7 +108,7 @@ export default async function handler(req, res) {
 
     for (const f of fixtures) {
       const docId = 'bsd-' + f.id;
-      if (existingIds.has(docId)) { skippedExisting++; continue; }
+      if (existingIds.has(docId) || existingBsdIds.has(String(f.id))) { skippedExisting++; continue; }
       const home = ourTeamFor(f.home_team_obj, f.home_team, ourTeamsByNorm);
       const away = ourTeamFor(f.away_team_obj, f.away_team, ourTeamsByNorm);
       if (!home || !away) { unmapped.push((f.home_team || '?') + ' vs ' + (f.away_team || '?')); continue; }
