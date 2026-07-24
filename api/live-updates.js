@@ -1,84 +1,54 @@
-// Función serverless (Vercel Cron, idealmente cada 5 minutos) que mantiene
-// el marcador EN VIVO de los partidos actualizado solo, sin que nadie
-// necesite tener la app abierta.
+// Función serverless (se dispara desde afuera cada pocos minutos — GitHub
+// Actions / cron-job.org) que mantiene el marcador EN VIVO, el estado y los
+// GOLES (con su autor) de los partidos de la FPC actualizados solos, sin que
+// nadie tenga la app abierta.
 //
-// Fuente de datos: la API no oficial de ESPN (site.api.espn.com), gratis y
-// sin API key ni restricción de temporada — a diferencia de API-Football,
-// cuyo plan gratis no daba acceso a la temporada 2026 (ver commits
-// anteriores). Verificado a mano contra la API real antes de escribir este
-// archivo:
-//   https://site.api.espn.com/apis/site/v2/sports/soccer/{liga}/scoreboard?dates=YYYYMMDD
-//   - liga = 'fifa.world' para partidos con competition:'mundial'
-//   - liga = 'col.1' para partidos con competition:'fpc' (Colombian Primera A)
-// La respuesta trae, en un solo pedido: marcador (competitors[].score),
-// estado del partido (competitions[0].status.type.state: 'pre'/'in'/'post')
-// y la lista de goles con jugador y minuto (competitions[0].details[],
-// filtrando scoringPlay:true) — no hace falta un segundo pedido para los
-// goles como sí hacía falta con API-Football.
+// Fuente de datos: BSD (sports.bzzoiro.com), liga 80 = Categoría Primera A.
+// Gratis y SIN límite de peticiones (a diferencia de ESPN/API-Football que se
+// usaron antes — ver historial). Cada partido de la FPC se creó con el botón
+// "Importar partidos" (ver api/importar-partidos.js), que le guardó su
+// 'bsdMatchId'; con ese id se le pide a BSD el detalle del partido
+// (/api/matches/{id}/?full=true), que trae marcador, estado e 'incidents'
+// (goles con {type,minute,player,player_id,is_home}). Los partidos de la FPC
+// que por lo que sea no tengan bsdMatchId se buscan por fecha+equipos y se les
+// guarda el bsdMatchId para la próxima.
+//
+// Los partidos de otra competencia (ej. 'mundial', que fue una prueba) no se
+// tocan acá — se actualizan a mano en Gestionar.
 //
 // En cada ejecución:
-//   1. Pasa a 'live' (por tiempo, sin llamar a ESPN) cualquier partido
-//      'scheduled' cuyo kickoff ya pasó. Esto es lo que hace que un partido
-//      que ya arrancó (o que ya terminó por completo sin que nadie se diera
-//      cuenta, ej. si el cron estuvo caído un rato) entre al paso 2 de todos
-//      modos — no hace falta que ESPN diga "ya empezó" para considerarlo.
-//   2. Le pone 'visible: true' a las predicciones de cualquier partido que ya
-//      no esté 'scheduled' (ver revealPredictions() y firestore.rules).
-//   3. Si no queda ningún partido 'live', termina ahí.
-//   4. Para cada partido 'live' (haya arrancado hace 2 minutos o llevado
-//      cerrado varios días sin que el cron corriera), consulta el scoreboard
-//      de ESPN de su competencia y fecha, y actualiza marcador + goles +
-//      status ('live' -> 'finished' cuando ESPN reporta state:'post').
+//   1. Pasa a 'live' (por tiempo) cualquier partido 'scheduled' cuyo kickoff
+//      ya pasó, para revelar predicciones aunque BSD se demore.
+//   2. Revela (visible:true) las predicciones de cualquier partido que ya no
+//      esté 'scheduled'.
+//   3. Para cada partido FPC no terminado, le pide a BSD marcador + goles +
+//      estado y los guarda.
 //
-// No hay chequeo de cuota: ESPN no tiene el límite diario estricto que sí
-// tenía el plan gratis de API-Football, así que este paso se quitó.
-//
-// La respuesta siempre incluye un array 'diagnostics' con, por cada partido
-// no terminado: el status TAL COMO está guardado en Firestore, la URL exacta
-// consultada a ESPN, cuántos eventos devolvió, si encontró el partido ahí
-// adentro, y si el intento de escribir en Firestore funcionó o el error
-// exacto si no. Pensado para poder abrir esta URL directo en el navegador
-// (con ?secret=) y ver qué está pasando de verdad, sin adivinar.
-//
-// Respaldo manual: en Gestionar, cualquier partido 'live' se puede editar a
-// mano (marcador directo o gol por gol) — no depende de que este cron ande a
-// tiempo ni de que ESPN responda (ver comentarios en app.js).
-//
-// Nota sobre el plan de Vercel: los Cron Jobs de Vercel en el plan Hobby
-// (gratis) solo se disparan una vez al día por más fina que sea la
-// expresión cron — no sirven para "cada 5 minutos". Por eso este endpoint
-// también se puede disparar desde afuera (ver .github/workflows/live-updates.yml,
-// que sí llama cada 5 minutos usando GitHub Actions, gratis). El endpoint es
-// idempotente y seguro de llamar así de seguido, o incluso a mano.
-//
-// Variables de entorno necesarias en Vercel:
-//   - FIREBASE_SERVICE_ACCOUNT: JSON del service account de Firebase (como texto)
-//   - CRON_SECRET (opcional pero recomendado): se puede mandar como header
-//     "Authorization: Bearer <CRON_SECRET>" (así lo manda Vercel Cron y el
-//     workflow de GitHub Actions) o, para poder abrir la URL directo en el
-//     navegador, como "?secret=<CRON_SECRET>" en la query string.
-//   (Ya no hace falta API_FOOTBALL_KEY para este endpoint.)
+// Auth: header "Authorization: Bearer <CRON_SECRET>" o "?secret=<CRON_SECRET>".
+// Variables de entorno: FIREBASE_SERVICE_ACCOUNT, BSD_API_KEY, CRON_SECRET (opc).
 
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 
-const ESPN_LEAGUE_SLUGS = { fpc: 'col.1', mundial: 'fifa.world' };
+const BSD_LEAGUE = 80;
+// nombre normalizado de NUESTRO equipo -> bsd team id (verificado 2026-07-24).
+const BSD_TEAM_IDS = {
+  'alianza fc': 4783, 'america de cali': 753, 'atletico bucaramanga': 771,
+  'atletico nacional': 766, 'boyaca chico': 4784, 'cucuta deportivo': 4635,
+  'deportes tolima': 781, 'deportivo cali': 3733, 'deportivo pasto': 3419,
+  'deportivo pereira': 4780, 'fortaleza ceif': 4782, 'independiente medellin': 786,
+  'independiente santa fe': 797, 'internacional de bogota': 3181, 'jaguares de cordoba': 4785,
+  'junior': 789, 'llaneros': 4781, 'millonarios': 736, 'once caldas': 3891, 'aguilas doradas': 4786
+};
 
-function matchCompetition(m) {
-  return m.competition === 'mundial' ? 'mundial' : 'fpc';
-}
+function matchCompetition(m) { return m.competition === 'mundial' ? 'mundial' : 'fpc'; }
+function norm(s) { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/\s+/g, ' '); }
+function bsdTeamId(team) { return team ? BSD_TEAM_IDS[norm(team.name)] : null; }
 
-// Colombia (Bogotá) no tiene horario de verano, siempre es UTC-5. Verificado
-// a mano que ESPN agrupa sus partidos bajo esta misma fecha "de Colombia"
-// incluso cuando, en UTC, el kickoff cae ya en el día siguiente (partidos
-// nocturnos).
-function bogotaDateStr(kickoff) {
-  const epochMs = typeof kickoff === 'number' ? kickoff : new Date(kickoff).getTime();
-  return new Date(epochMs - 5 * 3600 * 1000).toISOString().slice(0, 10);
-}
-function bogotaDateTimeStr(ms) {
-  if (ms == null) return null;
-  return new Date(ms - 5 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' (hora Bogotá)';
+// Fecha "de Colombia" (YYYY-MM-DD) de un kickoff en ms, sin depender de la
+// zona horaria del servidor (Bogotá siempre es UTC-5).
+function bogotaDateStr(ms) {
+  return new Date(ms - 5 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 function getDb() {
@@ -89,62 +59,48 @@ function getDb() {
   return getFirestore();
 }
 
-async function espnScoreboard(leagueSlug, dateStr) {
-  const url = `https://site.api.espn.com/apis/site/v2/sports/soccer/${leagueSlug}/scoreboard?dates=${dateStr.replace(/-/g, '')}`;
-  const apiRes = await fetch(url);
-  const json = await apiRes.json();
-  return { url, httpStatus: apiRes.status, events: json.events || [] };
-}
-
-// Compara nombres con más de una estrategia porque ESPN a veces agrega
-// sufijos ("Llaneros FC" vs nuestro "Llaneros") — probamos igualdad exacta,
-// que uno contenga al otro completo, y solo como último recurso la primera
-// palabra (evitando palabras genéricas de 3 letras o menos).
-function teamNameMatches(ourName, espnName) {
-  const a = (ourName || '').toLowerCase().trim();
-  const b = (espnName || '').toLowerCase().trim();
-  if (!a || !b) return false;
-  if (a === b || b.indexOf(a) >= 0 || a.indexOf(b) >= 0) return true;
-  const aFirst = a.split(' ')[0];
-  return aFirst.length > 3 && b.indexOf(aFirst) >= 0;
-}
-
-function findEspnEvent(events, home, away) {
-  return events.find(e => {
-    const c = e.competitions && e.competitions[0];
-    if (!c || !c.competitors) return false;
-    const homeComp = c.competitors.find(x => x.homeAway === 'home');
-    const awayComp = c.competitors.find(x => x.homeAway === 'away');
-    if (!homeComp || !awayComp) return false;
-    return teamNameMatches(home.name, homeComp.team.displayName) && teamNameMatches(away.name, awayComp.team.displayName);
-  });
-}
-
-// competitions[0].details[] trae goles Y tarjetas mezclados — scoringPlay
-// distingue lo que de verdad sumó gol (incluye autogoles y penales).
-function extractGoals(competition, homeEspnTeamId) {
-  const details = competition.details || [];
-  return details
-    .filter(d => d.scoringPlay)
-    .map(d => {
-      const minuteMatch = d.clock && d.clock.displayValue ? parseInt(d.clock.displayValue, 10) : NaN;
-      return {
-        team: d.team && d.team.id === homeEspnTeamId ? 'home' : 'away',
-        minute: isNaN(minuteMatch) ? null : minuteMatch
-      };
-    });
-}
-
 function matchStatusComputed(m) {
   if (m.status === 'live' || m.status === 'finished' || m.status === 'scheduled') return m.status;
   return m.homeScore != null ? 'finished' : 'scheduled';
 }
 
+// Estado de BSD -> nuestro estado. 'notstarted' se deja 'scheduled' salvo que
+// nuestro reloj diga que ya empezó (entonces 'live' provisional).
+function mapBsdStatus(bsdStatus, kickoffPassed) {
+  const s = (bsdStatus || '').toLowerCase();
+  if (/finish|ended|\bft\b|after|aet|pen|awarded|walkover/.test(s) || s === 'finished') return 'finished';
+  if (s === 'notstarted' || s === 'postponed' || s === 'canceled' || s === 'cancelled') return kickoffPassed ? 'live' : 'scheduled';
+  return 'live';
+}
+
+// De las incidencias de BSD saca los goles. is_home = equipo del jugador; en
+// autogol el marcador (que igual viene autoritativo en home_score/away_score)
+// lo maneja BSD, acá solo guardamos el gol para mostrarlo y para el goleo.
+function goalsFromIncidents(incidents) {
+  if (!Array.isArray(incidents)) return [];
+  return incidents
+    .filter(i => i.type === 'goal')
+    .map(i => ({
+      team: i.is_home ? 'home' : 'away',
+      minute: (i.minute == null ? null : i.minute),
+      player: i.player || null,
+      playerId: (i.player_id == null ? null : String(i.player_id)),
+      goalType: i.goal_type || null
+    }))
+    .sort((a, b) => (a.minute || 0) - (b.minute || 0));
+}
+
+async function bsdGet(path) {
+  const r = await fetch('https://sports.bzzoiro.com' + path, {
+    headers: { 'Authorization': 'Token ' + process.env.BSD_API_KEY }
+  });
+  if (!r.ok) throw new Error('BSD HTTP ' + r.status);
+  return r.json();
+}
+
 // Le pone 'visible: true' a las predicciones de un partido que ya no está
-// 'scheduled'. Es lo único que le permite a firestore.rules mostrarle a
-// alguien la predicción de otra persona (ver comentarios ahí) — nunca lo
-// hace el navegador porque nadie puede editar la predicción ajena. Se salta
-// las que ya estaban en true para no gastar escrituras de más.
+// 'scheduled'. Se salta las que ya estaban en true. Un partido 'finished' con
+// predictionsFullyRevealed:true ya no se relee (ahorra lecturas).
 async function revealPredictions(matchDoc) {
   const predsSnap = await matchDoc.ref.collection('predictions').get();
   let revealed = 0;
@@ -162,57 +118,22 @@ export default async function handler(req, res) {
     const authHeader = req.headers['authorization'];
     const querySecret = req.query && req.query.secret;
     const authorized = authHeader === `Bearer ${process.env.CRON_SECRET}` || querySecret === process.env.CRON_SECRET;
-    if (!authorized) {
-      res.status(401).json({ error: 'No autorizado. Usa "?secret=TU_CRON_SECRET" en la URL o el header Authorization.' });
-      return;
-    }
+    if (!authorized) { res.status(401).json({ error: 'No autorizado. Usa "?secret=TU_CRON_SECRET" o el header Authorization.' }); return; }
   }
   if (!process.env.FIREBASE_SERVICE_ACCOUNT) { res.status(500).json({ error: 'Falta configurar FIREBASE_SERVICE_ACCOUNT en Vercel.' }); return; }
+  if (!process.env.BSD_API_KEY) { res.status(500).json({ error: 'Falta configurar BSD_API_KEY en Vercel.' }); return; }
 
-  const diagnostics = []; // un objeto por partido no terminado, se va llenando en cada paso
-  const diagFor = (matchId) => diagnostics.find(d => d.id === matchId);
-
+  const diagnostics = [];
   try {
     const db = getDb();
     const now = Date.now();
 
-    // Paso 0: cargar todos los partidos y armar el diagnóstico base (lo que
-    // hay guardado en Firestore AHORA MISMO, antes de tocar nada) para los
-    // que no estén ya 'finished'.
     const matchesSnap = await db.collection('profetas').doc('matches').collection('matches').get();
     const teamsSnap = await db.collection('profetas').doc('teams').collection('teams').get();
     const teams = teamsSnap.docs.map(d => d.data());
     const teamById = id => teams.find(t => t.id === id);
 
-    for (const matchDoc of matchesSnap.docs) {
-      const m = matchDoc.data();
-      const computed = matchStatusComputed(m);
-      if (computed === 'finished' && m.status === 'finished') continue;
-      const home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-      diagnostics.push({
-        id: matchDoc.id,
-        teams: `${home ? home.name : '?'} vs ${away ? away.name : '?'}`,
-        competition: matchCompetition(m),
-        kickoffRaw: m.kickoff || null,
-        kickoff: bogotaDateTimeStr(m.kickoff),
-        statusRaw: m.status === undefined ? '(el campo status no existe en este documento)' : m.status,
-        statusComputadoAntes: computed,
-        homeScoreEnFirestoreAntes: m.homeScore,
-        awayScoreEnFirestoreAntes: m.awayScore,
-        pasoAVivoEnEstaEjecucion: false,
-        espnConsulta: null,
-        espnHttpStatus: null,
-        espnEventosDevueltos: null,
-        espnEncontroElPartido: null,
-        espnEstado: null,
-        espnMarcador: null,
-        espnEquiposEnLaRespuesta: null,
-        escrituraIntentada: false,
-        escrituraResultado: null
-      });
-    }
-
-    // Paso 1: pasar a 'live' por tiempo, sin llamar a ESPN.
+    // Paso 1: pasar a 'live' por tiempo (sin llamar a BSD).
     let flippedToLive = 0;
     for (const matchDoc of matchesSnap.docs) {
       const m = matchDoc.data();
@@ -220,148 +141,80 @@ export default async function handler(req, res) {
         const updates = { status: 'live' };
         if (m.homeScore == null) updates.homeScore = 0;
         if (m.awayScore == null) updates.awayScore = 0;
-        try {
-          await matchDoc.ref.update(updates);
-          flippedToLive++;
-          const d = diagFor(matchDoc.id);
-          if (d) { d.pasoAVivoEnEstaEjecucion = true; d.statusComputadoAntes = 'live (recién pasado)'; }
-        } catch (e) {
-          const d = diagFor(matchDoc.id);
-          if (d) d.escrituraResultado = 'ERROR al pasar a live: ' + String(e);
-        }
+        try { await matchDoc.ref.update(updates); flippedToLive++; } catch (e) {}
       }
     }
 
-    // Paso 2: revelar predicciones ajenas de cualquier partido que ya no
-    // esté 'scheduled' (ver revealPredictions arriba).
+    // Recargar si algo cambió, para el paso 2 y 3.
     const freshSnap = flippedToLive
       ? await db.collection('profetas').doc('matches').collection('matches').get()
       : matchesSnap;
+
+    // Paso 2: revelar predicciones de los que ya no están 'scheduled'.
     let predictionsRevealed = 0;
     for (const matchDoc of freshSnap.docs) {
       const m = matchDoc.data();
-      const computed = matchStatusComputed(m);
-      if (computed === 'scheduled') continue;
-      // Un partido 'finished' con predictionsFullyRevealed:true ya tuvo una
-      // corrida completa donde se revelaron todas sus predicciones — no
-      // puede aparecer ninguna nueva (el marcador y el status ya no
-      // cambian), así que releer su subcolección para siempre, cada minuto,
-      // es gasto de cuota de lectura sin ningún efecto. Esto fue lo que
-      // agotó la cuota gratis de Firestore el 2026-07-15 (ver evidencia real
-      // en el historial de este archivo): con decenas de partidos ya
-      // jugados y el cron corriendo cada 1-5 minutos las 24 horas, cada
-      // corrida releía TODAS las predicciones de TODOS los partidos
-      // terminados, para siempre, aunque no hubiera nada nuevo que revelar.
-      if (computed === 'finished' && m.predictionsFullyRevealed === true) continue;
+      const st = matchStatusComputed(m);
+      if (st === 'scheduled') continue;
+      if (st === 'finished' && m.predictionsFullyRevealed === true) continue;
       predictionsRevealed += await revealPredictions(matchDoc);
-      if (computed === 'finished') {
-        await matchDoc.ref.update({ predictionsFullyRevealed: true });
-      }
+      if (st === 'finished') { try { await matchDoc.ref.update({ predictionsFullyRevealed: true }); } catch (e) {} }
     }
 
-    // Paso 3: solo seguimos a pedirle datos a ESPN si de verdad hay algo en
-    // vivo (recién flipeado o de antes) que consultar.
-    const liveDocs = freshSnap.docs.filter(d => matchStatusComputed(d.data()) === 'live');
-
-    if (!liveDocs.length) {
-      res.status(200).json({
-        ok: true, flippedToLive, predictionsRevealed, liveChecked: 0,
-        message: 'No hay ningún partido con status "live" en Firestore ahora mismo — por eso no se consultó a ESPN. Revisa el campo "statusRaw" de cada partido en "diagnostics" para ver por qué.',
-        diagnostics
-      });
-      return;
-    }
-
-    // Paso 4: consultar el scoreboard de ESPN por competencia + fecha (un
-    // mismo día puede tener partidos de la FPC y del Mundial a la vez) y
-    // actualizar marcador, goles y status.
-    const groups = {};
-    for (const d of liveDocs) {
-      const competition = matchCompetition(d.data());
-      const date = bogotaDateStr(d.data().kickoff);
-      const key = competition + '|' + date;
-      if (!groups[key]) groups[key] = { competition, date, docs: [] };
-      groups[key].docs.push(d);
-    }
+    // Paso 3: para cada partido FPC no terminado, pedirle a BSD marcador +
+    // goles + estado.
     let updatedCount = 0, finishedCount = 0;
+    for (const matchDoc of freshSnap.docs) {
+      const m = matchDoc.data();
+      if (matchCompetition(m) !== 'fpc') continue;
+      if (matchStatusComputed(m) === 'finished') continue;
 
-    for (const key of Object.keys(groups)) {
-      const { competition, date, docs: dayDocs } = groups[key];
-      const leagueSlug = ESPN_LEAGUE_SLUGS[competition] || ESPN_LEAGUE_SLUGS.fpc;
-      let events = [];
-      let apiUrl = null, apiHttpStatus = null, apiError = null;
+      const home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
+      const diag = { id: matchDoc.id, teams: (home ? home.name : '?') + ' vs ' + (away ? away.name : '?'), bsdMatchId: m.bsdMatchId || null };
+
       try {
-        const result = await espnScoreboard(leagueSlug, date);
-        apiUrl = result.url; apiHttpStatus = result.httpStatus; events = result.events;
-      } catch (e) { apiError = String(e); }
+        // 1) conseguir el detalle del partido en BSD.
+        let bsdMatchId = m.bsdMatchId;
+        let detail = null;
 
-      for (const matchDoc of dayDocs) {
-        const m = matchDoc.data();
-        const d = diagFor(matchDoc.id);
-        if (d) {
-          d.espnConsulta = apiUrl;
-          d.espnHttpStatus = apiHttpStatus;
-          d.espnEventosDevueltos = events.length;
-          if (apiError) d.espnError = apiError;
+        if (bsdMatchId) {
+          detail = await bsdGet('/api/matches/' + bsdMatchId + '/?full=true&tz=America/Bogota');
+        } else if (m.kickoff && home && away) {
+          // Fallback: buscar por fecha + equipos, y guardar el bsdMatchId.
+          const date = bogotaDateStr(m.kickoff);
+          const list = await bsdGet('/api/matches/?league=' + BSD_LEAGUE + '&date_from=' + date + '&date_to=' + date + '&full=true&tz=America/Bogota&page_size=40');
+          const hId = bsdTeamId(home), aId = bsdTeamId(away);
+          const ev = (list.results || []).find(e => {
+            const eh = e.home_team_obj && e.home_team_obj.id, ea = e.away_team_obj && e.away_team_obj.id;
+            return eh === hId && ea === aId;
+          });
+          if (ev) { bsdMatchId = String(ev.id); detail = ev; }
         }
 
-        const home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-        if (!home || !away) {
-          if (d) d.espnEncontroElPartido = 'no — falta el equipo local o visitante en Firestore (homeTeamId/awayTeamId no coincide con ningún equipo)';
-          continue;
-        }
+        if (!detail) { diag.result = 'no se encontró el partido en BSD'; diagnostics.push(diag); continue; }
 
-        const ev = findEspnEvent(events, home, away);
-        if (!ev) {
-          if (d) {
-            d.espnEncontroElPartido = false;
-            d.espnEquiposEnLaRespuesta = events.map(e => e.shortName || e.name);
-          }
-          continue;
-        }
+        const kickoffPassed = m.kickoff && m.kickoff <= now;
+        const newStatus = mapBsdStatus(detail.status, kickoffPassed);
+        const goals = goalsFromIncidents(detail.incidents);
 
-        const competitionData = ev.competitions[0];
-        const homeComp = competitionData.competitors.find(x => x.homeAway === 'home');
-        const awayComp = competitionData.competitors.find(x => x.homeAway === 'away');
-        const state = competitionData.status.type.state; // 'pre' | 'in' | 'post'
+        const updates = { goals };
+        if (bsdMatchId && bsdMatchId !== m.bsdMatchId) updates.bsdMatchId = bsdMatchId;
+        if (detail.home_score != null) updates.homeScore = detail.home_score;
+        if (detail.away_score != null) updates.awayScore = detail.away_score;
+        updates.status = newStatus;
+        if (newStatus === 'finished') finishedCount++;
 
-        if (d) {
-          d.espnEncontroElPartido = true;
-          d.espnEstado = `${competitionData.status.type.name} (state=${state})`;
-          d.espnMarcador = `${homeComp.score}-${awayComp.score}`;
-        }
-
-        if (state === 'pre') {
-          if (d) d.escrituraResultado = 'ESPN todavía no marca este partido como arrancado (state=pre) — no se tocó el marcador.';
-          continue;
-        }
-
-        const updates = {};
-        const homeScoreNum = parseInt(homeComp.score, 10);
-        const awayScoreNum = parseInt(awayComp.score, 10);
-        if (!isNaN(homeScoreNum)) updates.homeScore = homeScoreNum;
-        if (!isNaN(awayScoreNum)) updates.awayScore = awayScoreNum;
-        if (state === 'post') { updates.status = 'finished'; finishedCount++; }
-
-        const goals = extractGoals(competitionData, homeComp.team.id);
-        if (goals.length) updates.goals = goals;
-
-        if (Object.keys(updates).length) {
-          if (d) d.escrituraIntentada = true;
-          try {
-            await matchDoc.ref.update(updates);
-            updatedCount++;
-            if (d) d.escrituraResultado = 'ok: ' + JSON.stringify(updates);
-          } catch (e) {
-            if (d) d.escrituraResultado = 'ERROR: ' + String(e);
-          }
-        } else if (d) {
-          d.escrituraResultado = 'no hacía falta escribir nada (ESPN no trajo marcador válido)';
-        }
+        await matchDoc.ref.update(updates);
+        updatedCount++;
+        diag.result = 'ok'; diag.bsdStatus = detail.status; diag.mapped = newStatus;
+        diag.score = (detail.home_score) + '-' + (detail.away_score); diag.goals = goals.length;
+      } catch (e) {
+        diag.result = 'ERROR: ' + String(e);
       }
+      diagnostics.push(diag);
     }
 
-    res.status(200).json({ ok: true, flippedToLive, predictionsRevealed, liveChecked: liveDocs.length, updated: updatedCount, finished: finishedCount, diagnostics });
+    res.status(200).json({ ok: true, flippedToLive, predictionsRevealed, updated: updatedCount, finished: finishedCount, diagnostics });
   } catch (err) {
     res.status(500).json({ error: 'Error actualizando marcador en vivo', details: String(err), diagnostics });
   }
