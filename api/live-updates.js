@@ -98,6 +98,37 @@ async function bsdGet(path) {
   return r.json();
 }
 
+// Actualiza sola la tabla de posiciones REAL de la liga (la de "Liga real" en
+// la app) desde el endpoint de standings de BSD, mapeando cada equipo de BSD a
+// NUESTRO equipo. Se guarda en el mismo formato que ya usa la app
+// ('profetas/realStandings' -> {data:{teamId:{pj,pg,pe,pp,gf,gc}}}), así que
+// el admin ya no la llena a mano.
+async function updateRealStandings(db, teams) {
+  const bsdIdToOurNorm = {};
+  Object.keys(BSD_TEAM_IDS).forEach(ourNorm => { bsdIdToOurNorm[BSD_TEAM_IDS[ourNorm]] = ourNorm; });
+  const teamByNorm = {};
+  teams.forEach(t => { teamByNorm[norm(t.name)] = t; });
+
+  const json = await bsdGet('/api/leagues/' + BSD_LEAGUE + '/standings/');
+  const rows = (json && json.standings) || [];
+  if (!rows.length) return 0;
+
+  const data = {};
+  let mapped = 0;
+  for (const r of rows) {
+    const ourNorm = bsdIdToOurNorm[r.team_id];
+    const ourTeam = ourNorm ? teamByNorm[ourNorm] : null;
+    if (!ourTeam) continue;
+    data[ourTeam.id] = {
+      pj: r.played || 0, pg: r.won || 0, pe: r.drawn || 0, pp: r.lost || 0,
+      gf: r.gf || 0, gc: r.ga || 0
+    };
+    mapped++;
+  }
+  if (mapped) await db.collection('profetas').doc('realStandings').set({ data });
+  return mapped;
+}
+
 // Le pone 'visible: true' a las predicciones de un partido que ya no está
 // 'scheduled'. Se salta las que ya estaban en true. Un partido 'finished' con
 // predictionsFullyRevealed:true ya no se relee (ahorra lecturas).
@@ -214,7 +245,11 @@ export default async function handler(req, res) {
       diagnostics.push(diag);
     }
 
-    res.status(200).json({ ok: true, flippedToLive, predictionsRevealed, updated: updatedCount, finished: finishedCount, diagnostics });
+    // Paso 4: actualizar sola la tabla de posiciones real desde BSD.
+    let standingsMapped = 0;
+    try { standingsMapped = await updateRealStandings(db, teams); } catch (e) { /* no crítico */ }
+
+    res.status(200).json({ ok: true, flippedToLive, predictionsRevealed, updated: updatedCount, finished: finishedCount, standingsMapped, diagnostics });
   } catch (err) {
     res.status(500).json({ error: 'Error actualizando marcador en vivo', details: String(err), diagnostics });
   }

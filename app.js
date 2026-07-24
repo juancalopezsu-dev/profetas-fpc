@@ -885,16 +885,20 @@ function ensureAuth(){
     }
   }
 
-  // Lista de goles (equipo + minuto) ordenada, usada tanto en la tarjeta de
-  // un partido en vivo/finalizado como en el modal de predicciones. Los
-  // goles pueden venir de API-Football (live-updates) o cargados a mano en
-  // Gestionar — para efectos de mostrarlos da igual el origen.
+  // Lista de goles (minuto + autor + equipo) ordenada, usada tanto en la
+  // tarjeta de un partido en vivo/finalizado como en el modal de predicciones.
+  // Los goles vienen de BSD (live-updates), que trae el autor (g.player) y su
+  // id (g.playerId); si por lo que sea no hay autor, se muestra solo el equipo.
   function goalsListHtml(m, home, away){
     if(!m.goals || !m.goals.length) return '';
     var sorted = m.goals.slice().sort(function(a,b){ return (a.minute||0)-(b.minute||0); });
     var items = sorted.map(function(g){
       var t = g.team==='home' ? home : away;
-      return '<div class="goal-row">⚽ <b>'+(g.minute!=null?g.minute+'\'':'')+'</b> '+escapeHtml(t?t.name:'?')+'</div>';
+      var teamName = t ? t.name : '?';
+      var who = g.player ? escapeHtml(g.player) : escapeHtml(teamName);
+      var own = g.goalType==='own' ? ' <span style="color:var(--muted);">(autogol)</span>' : '';
+      var teamTag = g.player ? ' <span style="color:var(--muted);">('+escapeHtml(teamName)+')</span>' : '';
+      return '<div class="goal-row">⚽ <b>'+(g.minute!=null?g.minute+'\'':'')+'</b> '+who+teamTag+own+'</div>';
     }).join('');
     return '<div class="goals-list">'+items+'</div>';
   }
@@ -957,13 +961,65 @@ function ensureAuth(){
   }
 
   /* ---------- TABLA ---------- */
+  // Tabla de goleo: suma los goles por jugador de TODOS los partidos de la FPC
+  // (los goles vienen de BSD con su player/playerId). No cuenta autogoles. Si
+  // el goleador está entre los jugadores importados (id 'bsd-'+playerId), se
+  // usan su foto y equipo; si no (ej. un defensa que no importamos), se
+  // muestra el nombre que trae el gol.
+  function computeGoleo(){
+    var byPlayer = {};
+    state.matches.forEach(function(m){
+      if(matchCompetition(m)!=='fpc') return;
+      (m.goals||[]).forEach(function(g){
+        if(g.goalType==='own') return;
+        var key = g.playerId ? ('id:'+g.playerId) : (g.player ? ('nm:'+g.player.toLowerCase()) : null);
+        if(!key) return;
+        if(!byPlayer[key]){
+          var pl = g.playerId ? state.players.find(function(p){ return p.id==='bsd-'+g.playerId || p.bsdId===String(g.playerId); }) : null;
+          var teamOfGoal = g.team==='home' ? teamById(m.homeTeamId) : teamById(m.awayTeamId);
+          byPlayer[key] = {
+            name: (pl && pl.name) ? pl.name : (g.player || '?'),
+            teamName: (pl && pl.teamName) ? pl.teamName : (teamOfGoal ? teamOfGoal.name : ''),
+            photoUrl: pl ? pl.photoUrl : null,
+            goals: 0
+          };
+        }
+        byPlayer[key].goals++;
+      });
+    });
+    return Object.keys(byPlayer).map(function(k){ return byPlayer[k]; })
+      .sort(function(a,b){ return b.goals-a.goals || a.name.localeCompare(b.name); });
+  }
+
+  function renderGoleoHtml(){
+    var rows = computeGoleo();
+    if(!rows.length){
+      return '<div class="empty">Todavía no hay goles registrados.<br>Se llenan solos con los partidos de la FPC.</div>';
+    }
+    var html = '<div style="font-size:10px; color:var(--muted); display:flex; align-items:center; padding:0 14px; margin-bottom:4px;">';
+    html += '<span style="width:28px;"></span><span style="width:38px;"></span><span style="flex:1;"></span><span style="width:44px;text-align:center;">Goles</span></div>';
+    rows.forEach(function(r, i){
+      var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
+      html += '<div class="board-row">';
+      html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
+      html += playerAvatarHtml(r, 38);
+      html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+escapeHtml(r.name)+'<div style="font-size:11px;color:var(--muted);">'+escapeHtml(r.teamName||'')+'</div></div>';
+      html += '<div style="width:44px;text-align:center;"><span class="board-points">'+r.goals+'</span></div>';
+      html += '</div>';
+    });
+    return html;
+  }
+
   function renderTabla(el){
     var html = '<div class="tabs" style="position:static; padding:0 0 10px; margin-bottom:6px;">';
     html += '<button class="tab'+(state.tablaSub==='apuesta'?' active':'')+'" data-sub="apuesta">Nuestra apuesta</button>';
     html += '<button class="tab'+(state.tablaSub==='real'?' active':'')+'" data-sub="real">Liga real</button>';
+    html += '<button class="tab'+(state.tablaSub==='goleo'?' active':'')+'" data-sub="goleo">Goleo</button>';
     html += '</div>';
 
-    if(state.tablaSub==='apuesta'){
+    if(state.tablaSub==='goleo'){
+      html += renderGoleoHtml();
+    } else if(state.tablaSub==='apuesta'){
       if(hasLiveMatches()){
         html += '<div class="live-banner"><span class="live-badge"><span class="live-dot"></span>EN VIVO</span> Hay partidos en curso — estos puntos son provisionales y pueden cambiar.</div>';
       }
@@ -1035,7 +1091,7 @@ function ensureAuth(){
       });
       var anyData = teamRows.some(function(r){ return r.s.pj>0; });
       if(!anyData){
-        html += '<div class="empty">Todavía no se ha cargado la tabla real de la liga.<br>Se actualiza desde Gestionar.</div>';
+        html += '<div class="empty">Todavía no se ha cargado la tabla real de la liga.<br>Se actualiza sola desde BSD (o a mano en Gestionar).</div>';
       } else {
         teamRows.sort(function(a,b){ return b.pts-a.pts || b.dg-a.dg; });
         html += '<div style="font-size:10px; color:var(--muted); display:flex; padding:0 14px; margin-bottom:4px;">';
@@ -1610,7 +1666,16 @@ function ensureAuth(){
     html += '</div>';
 
     html += '<div class="card">';
-    html += '<div class="section-title">Agregar partido</div>';
+    html += '<div class="section-title">Importar partidos de la FPC (BSD)</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Trae los próximos partidos de la Primera A y los crea de una (los que ya existan no se duplican). Después BSD les pone solo el marcador y los goles. Si alguno es de cuadrangulares o final, ajústale la fase abajo en "Cargar resultados" o donde salga. Tarda un par de segundos.</div>';
+    html += '<div class="auto-fetch-row">';
+    html += '<button class="btn btn-gold" id="import-matches-btn">Importar partidos</button>';
+    html += '<span id="import-matches-status" style="font-size:11px;color:var(--muted);"></span>';
+    html += '</div>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<div class="section-title">Agregar partido a mano</div>';
     html += '<div class="form-grid">';
     html += '<div class="form-row"><label>Competencia</label><select id="m-competition"><option value="fpc">FPC</option><option value="mundial">Mundial</option></select></div>';
     html += '<div class="form-row"><label>Fase</label><select id="m-phase"><option value="regular">Regular</option><option value="cuadrangulares">Cuadrangulares</option><option value="final">Final</option></select></div>';
@@ -1956,6 +2021,33 @@ function ensureAuth(){
       btn.disabled = true;
       try{ await updatePlayersFromBSD(statusEl); }
       finally{ btn.disabled = false; }
+    });
+
+    document.getElementById('import-matches-btn').addEventListener('click', async function(){
+      var btn = this;
+      var statusEl = document.getElementById('import-matches-status');
+      btn.disabled = true;
+      statusEl.innerHTML = '<span class="spinner"></span> Trayendo los partidos de BSD...';
+      try{
+        var idToken = await auth.currentUser.getIdToken();
+        var resp = await fetch('/api/importar-partidos', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer '+idToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        var data = await resp.json();
+        if(!resp.ok || data.error){
+          statusEl.textContent = 'Error: '+(data.error || ('HTTP '+resp.status))+(data.details ? ' ('+data.details+')' : '');
+        } else {
+          var msg = 'Listo: '+data.created+' partido(s) nuevo(s)';
+          if(data.skippedExisting){ msg += ', '+data.skippedExisting+' ya existían'; }
+          msg += '.';
+          if(data.unmapped && data.unmapped.length){ msg += ' Sin mapear: '+data.unmapped.join(', ')+'.'; }
+          statusEl.textContent = msg;
+        }
+      }catch(e){
+        statusEl.textContent = 'No se pudo conectar con el servidor. Revisa tu conexión.';
+      }finally{ btn.disabled = false; }
     });
 
     el.querySelectorAll('[data-save-result]').forEach(function(btn){
