@@ -2040,7 +2040,8 @@ function ensureAuth(){
           statusEl.textContent = 'Error: '+(data.error || ('HTTP '+resp.status))+(data.details ? ' ('+data.details+')' : '');
         } else {
           var msg = 'Listo: '+data.created+' partido(s) nuevo(s)';
-          if(data.skippedExisting){ msg += ', '+data.skippedExisting+' ya existían'; }
+          if(data.linked){ msg += ', '+data.linked+' enlazado(s) a los que ya tenías'; }
+          if(data.skippedExisting){ msg += ', '+data.skippedExisting+' ya estaban'; }
           msg += '.';
           if(data.unmapped && data.unmapped.length){ msg += ' Sin mapear: '+data.unmapped.join(', ')+'.'; }
           statusEl.textContent = msg;

@@ -93,6 +93,16 @@ export default async function handler(req, res) {
     const existingSnap = await matchesCol.get();
     const existingIds = new Set(existingSnap.docs.map(d => d.id));
     const existingBsdIds = new Set(existingSnap.docs.map(d => d.data().bsdMatchId).filter(Boolean).map(String));
+    // Partidos FPC ya existentes SIN bsdMatchId, indexados por par de equipos,
+    // para "enlazarlos" (guardarles el bsdMatchId) en vez de duplicarlos si el
+    // mismo enfrentamiento ya estaba creado a mano.
+    const unlinkedByPair = {};
+    existingSnap.docs.forEach(d => {
+      const m = d.data();
+      if (!m.bsdMatchId && (m.competition !== 'mundial') && m.homeTeamId && m.awayTeamId) {
+        unlinkedByPair[m.homeTeamId + '|' + m.awayTeamId] = d.ref;
+      }
+    });
 
     // Fixtures próximos de BSD.
     const url = 'https://sports.bzzoiro.com/api/matches/?league=80&status=notstarted&tz=America/Bogota&page_size=50';
@@ -101,7 +111,7 @@ export default async function handler(req, res) {
     const body = await r.json();
     const fixtures = body.results || [];
 
-    let created = 0, skippedExisting = 0;
+    let created = 0, skippedExisting = 0, linked = 0;
     const unmapped = [];
     let batch = db.batch(); let ops = 0;
     async function commitIfFull() { ops++; if (ops >= 450) { await batch.commit(); batch = db.batch(); ops = 0; } }
@@ -112,6 +122,16 @@ export default async function handler(req, res) {
       const home = ourTeamFor(f.home_team_obj, f.home_team, ourTeamsByNorm);
       const away = ourTeamFor(f.away_team_obj, f.away_team, ourTeamsByNorm);
       if (!home || !away) { unmapped.push((f.home_team || '?') + ' vs ' + (f.away_team || '?')); continue; }
+      // ¿Ya existe este mismo enfrentamiento creado a mano (sin bsdMatchId)?
+      // Entonces solo lo enlazamos, no lo duplicamos.
+      const pairRef = unlinkedByPair[home.id + '|' + away.id];
+      if (pairRef) {
+        batch.update(pairRef, { bsdMatchId: String(f.id) });
+        linked++;
+        delete unlinkedByPair[home.id + '|' + away.id];
+        await commitIfFull();
+        continue;
+      }
       const kickoff = f.event_date ? new Date(f.event_date).getTime() : null;
       batch.set(matchesCol.doc(docId), {
         id: docId,
@@ -131,7 +151,7 @@ export default async function handler(req, res) {
     }
     if (ops > 0) await batch.commit();
 
-    res.status(200).json({ ok: true, created, skippedExisting, unmapped, fixturesFound: fixtures.length });
+    res.status(200).json({ ok: true, created, linked, skippedExisting, unmapped, fixturesFound: fixtures.length });
   } catch (err) {
     res.status(500).json({ error: 'Error importando partidos', details: String(err) });
   }

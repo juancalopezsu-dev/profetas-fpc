@@ -108,8 +108,10 @@ export default async function handler(req, res) {
         if (bsdMatchId) {
           detail = await bsdGet('/api/matches/' + bsdMatchId + '/?full=true&tz=America/Bogota');
         } else if (home && away) {
-          const date = bogotaDateStr(m.kickoff);
-          const list = await bsdGet('/api/matches/?league=' + BSD_LEAGUE + '&date_from=' + date + '&date_to=' + date + '&full=true&tz=America/Bogota&page_size=40');
+          // Ventana de ±1 día (ver la misma nota en api/live-updates.js).
+          const dFrom = bogotaDateStr(m.kickoff - 86400000);
+          const dTo = bogotaDateStr(m.kickoff + 86400000);
+          const list = await bsdGet('/api/matches/?league=' + BSD_LEAGUE + '&date_from=' + dFrom + '&date_to=' + dTo + '&full=true&tz=America/Bogota&page_size=60');
           const hId = bsdTeamId(home), aId = bsdTeamId(away);
           const ev = (list.results || []).find(e => (e.home_team_obj && e.home_team_obj.id) === hId && (e.away_team_obj && e.away_team_obj.id) === aId);
           if (ev) { bsdMatchId = String(ev.id); detail = ev; }

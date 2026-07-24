@@ -211,9 +211,14 @@ export default async function handler(req, res) {
         if (bsdMatchId) {
           detail = await bsdGet('/api/matches/' + bsdMatchId + '/?full=true&tz=America/Bogota');
         } else if (m.kickoff && home && away) {
-          // Fallback: buscar por fecha + equipos, y guardar el bsdMatchId.
-          const date = bogotaDateStr(m.kickoff);
-          const list = await bsdGet('/api/matches/?league=' + BSD_LEAGUE + '&date_from=' + date + '&date_to=' + date + '&full=true&tz=America/Bogota&page_size=40');
+          // Fallback: buscar por fecha + equipos, y guardar el bsdMatchId. Se
+          // usa una ventana de ±1 día porque el filtro de fecha de BSD no
+          // siempre cae en la misma fecha "de Bogotá" (partidos nocturnos que
+          // en la zona de BSD ya son del día siguiente) — el emparejamiento
+          // real lo da el par de equipos, que es único por jornada.
+          const dFrom = bogotaDateStr(m.kickoff - 86400000);
+          const dTo = bogotaDateStr(m.kickoff + 86400000);
+          const list = await bsdGet('/api/matches/?league=' + BSD_LEAGUE + '&date_from=' + dFrom + '&date_to=' + dTo + '&full=true&tz=America/Bogota&page_size=60');
           const hId = bsdTeamId(home), aId = bsdTeamId(away);
           const ev = (list.results || []).find(e => {
             const eh = e.home_team_obj && e.home_team_obj.id, ea = e.away_team_obj && e.away_team_obj.id;
