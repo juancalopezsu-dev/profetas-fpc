@@ -64,12 +64,15 @@ function matchStatusComputed(m) {
   return m.homeScore != null ? 'finished' : 'scheduled';
 }
 
-// Estado de BSD -> nuestro estado. 'notstarted' se deja 'scheduled' salvo que
-// nuestro reloj diga que ya empezó (entonces 'live' provisional).
-function mapBsdStatus(bsdStatus, kickoffPassed) {
+// Estado de BSD -> nuestro estado. Se confía en BSD (no en nuestro reloj):
+// si BSD dice 'notstarted', el partido NO ha empezado, punto — antes usábamos
+// "nuestro reloj dice que ya pasó el kickoff" como respaldo, pero eso hacía que
+// un partido con la hora mal guardada se pasara a 'live' y cerrara las
+// predicciones antes de tiempo. BSD es confiable, así que manda BSD.
+function mapBsdStatus(bsdStatus) {
   const s = (bsdStatus || '').toLowerCase();
   if (/finish|ended|\bft\b|after|aet|pen|awarded|walkover/.test(s) || s === 'finished') return 'finished';
-  if (s === 'notstarted' || s === 'postponed' || s === 'canceled' || s === 'cancelled') return kickoffPassed ? 'live' : 'scheduled';
+  if (s === 'notstarted' || s === 'postponed' || s === 'canceled' || s === 'cancelled') return 'scheduled';
   return 'live';
 }
 
@@ -164,10 +167,15 @@ export default async function handler(req, res) {
     const teams = teamsSnap.docs.map(d => d.data());
     const teamById = id => teams.find(t => t.id === id);
 
-    // Paso 1: pasar a 'live' por tiempo (sin llamar a BSD).
+    // Paso 1: pasar a 'live' por tiempo (sin llamar a BSD) SOLO para partidos
+    // que no tienen bsdMatchId (ej. 'mundial' o creados a mano sin enlazar).
+    // Los partidos enlazados a BSD reciben su estado directo de BSD en el
+    // Paso 3 — no se disparan por nuestro reloj, porque si la hora guardada
+    // está mal se pasarían a 'live' antes de tiempo.
     let flippedToLive = 0;
     for (const matchDoc of matchesSnap.docs) {
       const m = matchDoc.data();
+      if (m.bsdMatchId) continue;
       if (matchStatusComputed(m) === 'scheduled' && m.kickoff && m.kickoff <= now) {
         const updates = { status: 'live' };
         if (m.homeScore == null) updates.homeScore = 0;
@@ -229,8 +237,7 @@ export default async function handler(req, res) {
 
         if (!detail) { diag.result = 'no se encontró el partido en BSD'; diagnostics.push(diag); continue; }
 
-        const kickoffPassed = m.kickoff && m.kickoff <= now;
-        const newStatus = mapBsdStatus(detail.status, kickoffPassed);
+        const newStatus = mapBsdStatus(detail.status);
         const goals = goalsFromIncidents(detail.incidents);
 
         const updates = { goals };
@@ -239,6 +246,14 @@ export default async function handler(req, res) {
         if (detail.away_score != null) updates.awayScore = detail.away_score;
         updates.status = newStatus;
         if (newStatus === 'finished') finishedCount++;
+        // Corregir la hora de inicio desde BSD (que la trae bien) mientras el
+        // partido siga programado. Varios partidos se crearon con la hora mal
+        // (5h de menos, el desfase de zona horaria); esto los deja en su hora
+        // real, y de paso evita que el cierre de predicciones caiga antes.
+        if (newStatus === 'scheduled' && detail.event_date) {
+          const bsdKickoff = new Date(detail.event_date).getTime();
+          if (!isNaN(bsdKickoff) && bsdKickoff !== m.kickoff) updates.kickoff = bsdKickoff;
+        }
 
         await matchDoc.ref.update(updates);
         updatedCount++;

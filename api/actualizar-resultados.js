@@ -37,10 +37,10 @@ function matchStatus(m) {
   if (m.status === 'live' || m.status === 'finished' || m.status === 'scheduled') return m.status;
   return m.homeScore != null ? 'finished' : 'scheduled';
 }
-function mapBsdStatus(bsdStatus, kickoffPassed) {
+function mapBsdStatus(bsdStatus) {
   const s = (bsdStatus || '').toLowerCase();
   if (/finish|ended|\bft\b|after|aet|pen|awarded|walkover/.test(s) || s === 'finished') return 'finished';
-  if (s === 'notstarted' || s === 'postponed' || s === 'canceled' || s === 'cancelled') return kickoffPassed ? 'live' : 'scheduled';
+  if (s === 'notstarted' || s === 'postponed' || s === 'canceled' || s === 'cancelled') return 'scheduled';
   return 'live';
 }
 function goalsFromIncidents(incidents) {
@@ -118,10 +118,15 @@ export default async function handler(req, res) {
         }
         if (!detail) continue;
 
-        const updates = { goals: goalsFromIncidents(detail.incidents), status: mapBsdStatus(detail.status, true) };
+        const newStatus = mapBsdStatus(detail.status);
+        const updates = { goals: goalsFromIncidents(detail.incidents), status: newStatus };
         if (bsdMatchId && bsdMatchId !== m.bsdMatchId) updates.bsdMatchId = bsdMatchId;
         if (detail.home_score != null) updates.homeScore = detail.home_score;
         if (detail.away_score != null) updates.awayScore = detail.away_score;
+        if (newStatus === 'scheduled' && detail.event_date) {
+          const bsdKickoff = new Date(detail.event_date).getTime();
+          if (!isNaN(bsdKickoff) && bsdKickoff !== m.kickoff) updates.kickoff = bsdKickoff;
+        }
         await matchDoc.ref.update(updates);
         updated++;
       } catch (e) { /* seguimos con los demás */ }
