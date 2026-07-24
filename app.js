@@ -1065,18 +1065,17 @@ function ensureAuth(){
           } else {
             var pick = state.preseason.picks[r.profile.id];
             var champT = pick ? teamById(pick.championTeamId) : null;
-            var scorerName = pick && pick.scorerName ? pick.scorerName : '';
-            var res = state.preseason.result;
-            // Antes de que se cierre y califique la pre-temporada (ver
-            // Gestionar), se muestra dorado/neutro (pill-yellow) porque
-            // todavía no hay veredicto de acierto o error.
-            var scorerCls = 'pill-yellow', champCls = 'pill-yellow';
-            if(res){
-              scorerCls = (res.scorerCorrectIds||[]).indexOf(r.profile.id)>=0 ? 'pill-green' : 'pill-red';
-              champCls = (res.championTeamId && pick && pick.championTeamId===res.championTeamId) ? 'pill-green' : 'pill-red';
+            // Goleador: la foto del jugador que eligió (por scorerPlayerId, que
+            // calza con los jugadores importados de BSD). Si no está entre los
+            // importados o es un pick viejo sin id, se muestra con iniciales a
+            // partir del nombre guardado.
+            var scorerPlayer = null;
+            if(pick && pick.scorerPlayerId){
+              scorerPlayer = state.players.find(function(p){ return p.id==='bsd-'+pick.scorerPlayerId || p.bsdId===String(pick.scorerPlayerId); });
             }
-            html += '<div style="width:52px;text-align:center;">'+(scorerName ? '<span class="mini-pill '+scorerCls+'" title="'+escapeHtml(scorerName)+'">'+escapeHtml(scorerName)+'</span>' : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
-            html += '<div style="width:42px;text-align:center;">'+(champT ? '<span class="mini-pill '+champCls+'">'+escapeHtml(champT.code)+'</span>' : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
+            if(!scorerPlayer && pick && pick.scorerName){ scorerPlayer = { name: pick.scorerName, photoUrl: null }; }
+            html += '<div style="width:52px;display:flex;justify-content:center;" title="'+(pick&&pick.scorerName?escapeHtml(pick.scorerName):'')+'">'+(scorerPlayer ? playerAvatarHtml(scorerPlayer, 30) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
+            html += '<div style="width:42px;display:flex;justify-content:center;" title="'+(champT?escapeHtml(champT.name):'')+'">'+(champT ? shieldHtml(champT, 28) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
           }
           html += '<div style="width:60px;"><div class="board-points">'+r.points+'</div><span class="board-points-label">Puntos</span></div>';
           html += '</div>';
