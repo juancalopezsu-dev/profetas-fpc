@@ -14,7 +14,7 @@ export default async function handler(req, res) {
   }
   const HOST = 'https://v3.football.api-sports.io';
   const headers = { 'x-apisports-key': apiKey };
-  const out = { teamsBySeasonTried: {}, santaFeTeamId: null, squadsRaw: null };
+  const out = { teamsBySeasonTried: {}, santaFeTeamId: null, squadsRaw: null, allTeams2024: null };
 
   async function getJson(url) {
     const r = await fetch(url, { headers });
@@ -34,6 +34,9 @@ export default async function handler(req, res) {
       if (!santaFeId && body.response && body.response.length) {
         const match = body.response.find(t => t.team && /santa\s*fe/i.test(t.team.name || ''));
         if (match) santaFeId = match.team.id;
+      }
+      if (season === 2024 && body.response) {
+        out.allTeams2024 = body.response.map(t => ({ id: t.team.id, name: t.team.name }));
       }
     }
     out.santaFeTeamId = santaFeId;
