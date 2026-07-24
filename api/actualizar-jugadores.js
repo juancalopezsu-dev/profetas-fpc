@@ -71,8 +71,8 @@ const AF_TEAM_IDS = {
 };
 
 const OFFENSIVE_POSITIONS = ['Attacker', 'Midfielder'];
-const CHUNK_SIZE = 5;      // equipos por tanda (5 * 7s = 35s, con margen bajo el tope de 60s de Vercel)
-const PACE_MS = 7000;      // pausa entre llamadas para no pasar de 10/min
+const CHUNK_SIZE = 5;      // equipos por tanda (5 * 8s = 40s, con margen bajo el tope de 60s de Vercel)
+const PACE_MS = 8000;      // pausa entre llamadas para no pasar de 10/min (con holgura)
 
 function getApp() {
   if (!getApps().length) {
@@ -130,7 +130,14 @@ export default async function handler(req, res) {
     catch (e) { res.status(401).json({ error: 'Token inválido o vencido. Vuelve a entrar como administrador.' }); return; }
     if (decoded.admin !== true) { res.status(403).json({ error: 'Esta acción es solo para administradores.' }); return; }
 
-    const offset = Math.max(0, parseInt((req.body && req.body.offset) || 0, 10) || 0);
+    const body = req.body || {};
+    const offset = Math.max(0, parseInt(body.offset || 0, 10) || 0);
+    // Modo reintento: el navegador manda los nombres de los equipos que
+    // fallaron en la pasada normal (por el límite de 10/min de API-Football)
+    // para volver a intentarlos, ya con el límite recuperado. En este modo
+    // NO se borra la colección ni se avanza por 'offset' — solo se procesan
+    // esos equipos puntuales.
+    const retryTeams = Array.isArray(body.retryTeams) ? body.retryTeams : null;
     const apiKey = process.env.API_FOOTBALL_KEY;
     const db = getFirestore();
     const playersCol = db.collection('profetas').doc('players').collection('players');
@@ -151,9 +158,10 @@ export default async function handler(req, res) {
       else unmappedTeams.push(t.name);
     }
 
-    // En la primera tanda, borrar la colección entera para no dejar jugadores
-    // viejos (ej. de la fuente ESPN anterior o de un equipo que ya no está).
-    if (offset === 0) {
+    // En la primera tanda normal (offset 0, no reintento), borrar la colección
+    // entera para no dejar jugadores viejos (ej. de la fuente ESPN anterior o
+    // de un equipo que ya no está).
+    if (!retryTeams && offset === 0) {
       const existing = await playersCol.get();
       let delBatch = db.batch(); let n = 0;
       for (const doc of existing.docs) {
@@ -163,7 +171,9 @@ export default async function handler(req, res) {
       if (n > 0) await delBatch.commit();
     }
 
-    const slice = mapped.slice(offset, offset + CHUNK_SIZE);
+    const slice = retryTeams
+      ? mapped.filter(m => retryTeams.indexOf(m.teamName) >= 0)
+      : mapped.slice(offset, offset + CHUNK_SIZE);
     let savedThisChunk = 0;
     const chunkErrors = [];
     let batch = db.batch(); let ops = 0;
@@ -197,6 +207,18 @@ export default async function handler(req, res) {
       }
     }
     if (ops > 0) await batch.commit();
+
+    if (retryTeams) {
+      res.status(200).json({
+        ok: true,
+        retry: true,
+        totalTeams: mapped.length,
+        savedThisChunk,
+        chunkErrors,
+        unmappedTeams
+      });
+      return;
+    }
 
     const nextOffset = offset + CHUNK_SIZE;
     const done = nextOffset >= mapped.length;

@@ -272,11 +272,24 @@ function ensureAuth(){
   // API-Football (nóminas completas, con foto y posición limpia — a
   // diferencia de ESPN, ver el comentario de cabecera de ese archivo). El
   // plan gratis limita a 10 peticiones/minuto, así que la función trabaja
-  // POR TANDAS: acá el navegador la llama en bucle (offset 0, 6, 12, ...),
-  // mostrando el progreso, hasta que responda done:true. Cada tanda tarda
-  // ~45s (pausas de 7s entre equipos), así que el proceso completo son un
-  // par de minutos — normal, es una acción de administrador que se hace
-  // rara vez.
+  // POR TANDAS: acá el navegador la llama en bucle (offset 0, 5, 10, ...),
+  // mostrando el progreso, hasta que responda done:true. Si algún equipo
+  // falla por el límite, al final se reintenta automáticamente (ver la
+  // segunda fase abajo) — antes esos equipos se quedaban por fuera en
+  // silencio. El proceso completo son un par de minutos: normal, es una
+  // acción de administrador que se hace rara vez.
+  function sleepMs(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+
+  async function callUpdatePlayers(idToken, payload){
+    var resp = await fetch('/api/actualizar-jugadores', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer '+idToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    var data = await resp.json();
+    return { resp: resp, data: data };
+  }
+
   async function updatePlayersFromApiFootball(statusEl){
     var idToken;
     try{
@@ -288,42 +301,64 @@ function ensureAuth(){
 
     var offset = 0;
     var totalSaved = 0;
-    var allErrors = [];
+    var failedTeams = [];
     var unmapped = [];
     var totalTeams = null;
 
+    // Fase 1: pasada normal, tanda por tanda.
     while(true){
       statusEl.innerHTML = '<span class="spinner"></span> Actualizando jugadores'+(totalTeams!==null ? ' — equipo '+Math.min(offset, totalTeams)+'/'+totalTeams : '')+'... (esto tarda un par de minutos, no cierres la app)';
-      var resp, data;
+      var r;
       try{
-        resp = await fetch('/api/actualizar-jugadores', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer '+idToken, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ offset: offset })
-        });
-        data = await resp.json();
+        r = await callUpdatePlayers(idToken, { offset: offset });
       }catch(e){
-        statusEl.textContent = 'Se cortó la conexión a mitad del proceso (equipo '+offset+'). Dale a "Actualizar jugadores" otra vez — vuelve a empezar desde cero.';
+        statusEl.textContent = 'Se cortó la conexión a mitad del proceso. Dale a "Actualizar jugadores" otra vez — vuelve a empezar desde cero.';
         return;
       }
-      if(!resp.ok || data.error){
-        statusEl.textContent = 'Error: '+(data.error || ('HTTP '+resp.status))+(data.details ? ' ('+data.details+')' : '');
+      if(!r.resp.ok || r.data.error){
+        statusEl.textContent = 'Error: '+(r.data.error || ('HTTP '+r.resp.status))+(r.data.details ? ' ('+r.data.details+')' : '');
         return;
       }
-      totalTeams = data.totalTeams;
-      totalSaved += (data.savedThisChunk || 0);
-      if(data.chunkErrors && data.chunkErrors.length){ allErrors = allErrors.concat(data.chunkErrors.map(function(e){ return e.team; })); }
-      if(data.unmappedTeams){ unmapped = data.unmappedTeams; }
+      totalTeams = r.data.totalTeams;
+      totalSaved += (r.data.savedThisChunk || 0);
+      if(r.data.chunkErrors && r.data.chunkErrors.length){ failedTeams = failedTeams.concat(r.data.chunkErrors.map(function(e){ return e.team; })); }
+      if(r.data.unmappedTeams){ unmapped = r.data.unmappedTeams; }
 
-      statusEl.innerHTML = '<span class="spinner"></span> Actualizando jugadores — equipo '+data.processedSoFar+'/'+data.totalTeams+' ('+totalSaved+' guardados)... (no cierres la app)';
+      statusEl.innerHTML = '<span class="spinner"></span> Actualizando jugadores — equipo '+r.data.processedSoFar+'/'+r.data.totalTeams+' ('+totalSaved+' guardados)... (no cierres la app)';
 
-      if(data.done) break;
-      offset = data.nextOffset;
+      if(r.data.done) break;
+      offset = r.data.nextOffset;
+    }
+
+    // Fase 2: reintentar los equipos que fallaron (por el límite de 10/min),
+    // en grupos de 5, hasta 2 rondas, esperando entre rondas a que el límite
+    // se recupere.
+    var round = 0;
+    while(failedTeams.length && round < 2){
+      round++;
+      statusEl.innerHTML = '<span class="spinner"></span> Reintentando equipos que fallaron ('+failedTeams.join(', ')+')... esperando a que se libere el límite de la API';
+      await sleepMs(15000);
+      var stillFailed = [];
+      for(var i=0; i<failedTeams.length; i+=5){
+        var batch = failedTeams.slice(i, i+5);
+        statusEl.innerHTML = '<span class="spinner"></span> Reintentando: '+batch.join(', ')+'...';
+        var rr;
+        try{
+          rr = await callUpdatePlayers(idToken, { retryTeams: batch });
+        }catch(e){
+          stillFailed = stillFailed.concat(batch);
+          continue;
+        }
+        if(!rr.resp.ok || rr.data.error){ stillFailed = stillFailed.concat(batch); continue; }
+        totalSaved += (rr.data.savedThisChunk || 0);
+        if(rr.data.chunkErrors && rr.data.chunkErrors.length){ stillFailed = stillFailed.concat(rr.data.chunkErrors.map(function(e){ return e.team; })); }
+      }
+      failedTeams = stillFailed;
     }
 
     var msg = 'Listo: '+totalSaved+' jugadores ofensivos guardados de '+totalTeams+' equipos.';
     if(unmapped.length){ msg += ' Sin mapear (avísale al desarrollador para agregar su ID): '+unmapped.join(', ')+'.'; }
-    if(allErrors.length){ msg += ' Fallaron (reintenta en un minuto): '+allErrors.join(', ')+'.'; }
+    if(failedTeams.length){ msg += ' No se pudieron traer (dale otra vez a "Actualizar jugadores" en un minuto): '+failedTeams.join(', ')+'.'; }
     statusEl.textContent = msg;
   }
 
