@@ -49,6 +49,18 @@ export default async function handler(req, res) {
       out.squadsNote = 'No se pudo obtener el ID de Santa Fe desde /teams en ninguna temporada probada — mira teamsBySeasonTried para ver el error exacto.';
     }
 
+    // 3) ¿Funciona /teams?search= en el plan gratis? (para equipos ascendidos
+    //    que no están en la temporada 2024, como Llaneros o Cúcuta).
+    out.searchTests = {};
+    for (const term of ['llaneros', 'cucuta']) {
+      const { httpStatus, body } = await getJson(`${HOST}/teams?search=${term}`);
+      out.searchTests[term] = {
+        httpStatus,
+        errors: body.errors && Object.keys(body.errors).length ? body.errors : null,
+        results: (body.response || []).map(t => ({ id: t.team.id, name: t.team.name, country: t.team.country }))
+      };
+    }
+
     res.status(200).json(out);
   } catch (err) {
     res.status(500).json({ error: 'Error en el diagnóstico', details: String(err), partial: out });
