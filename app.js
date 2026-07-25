@@ -1059,6 +1059,10 @@ function ensureAuth(){
     return html;
   }
 
+  // Primer nombre (primera palabra) — para mostrar el nombre debajo de la foto
+  // en la tabla "Nuestra apuesta" sin que se corte.
+  function firstName(n){ return ((n||'').trim().split(/\s+/)[0]) || (n||''); }
+
   function renderTabla(el){
     var html = '<div class="subtabs">';
     html += '<button class="subtab'+(state.tablaSub==='apuesta'?' active':'')+'" data-sub="apuesta">Nuestra apuesta</button>';
@@ -1097,9 +1101,9 @@ function ensureAuth(){
         html += '<div class="empty">Todavía no hay jugadores.</div>';
       } else {
         html += '<div style="font-size:11px; color:var(--muted); display:flex; align-items:center; padding:0 16px; margin-bottom:4px; gap:14px;">';
-        html += '<span style="width:30px;"></span><span style="width:46px;"></span><span style="flex:1;"></span>';
+        html += '<span style="width:30px;"></span><span style="flex:1;"></span>';
         if(featuredLive){
-          html += '<span style="width:68px;text-align:center;">Predicción</span><span style="width:52px;text-align:center;">Puntos</span>';
+          html += '<span style="width:72px;text-align:center;">Predicción</span><span style="width:56px;text-align:center;">Puntos</span>';
         } else {
           html += '<span style="width:58px;text-align:center;">Goleador</span><span style="width:48px;text-align:center;">Campeón</span>';
         }
@@ -1109,8 +1113,7 @@ function ensureAuth(){
           var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
           html += '<div class="board-row'+(i===0?' top1':'')+'" data-profile-detail="'+r.profile.id+'" style="cursor:pointer;">';
           html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
-          html += avatarHtml(r.profile, 46);
-          html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+escapeHtml(r.profile.name)+'</div>';
+          html += '<div class="board-person">'+avatarHtml(r.profile, 46)+'<span class="board-firstname">'+escapeHtml(firstName(r.profile.name))+'</span></div>';
           if(featuredLive){
             // Durante el partido en vivo: la predicción de esa persona para
             // ESTE partido (pastilla de color según cómo va) y, en columna
@@ -1120,11 +1123,11 @@ function ensureAuth(){
             if(effLive){
               var liveCls = predictionPillClass(featuredLive, effLive.pred);
               var livePts = pointsForPrediction(featuredLive, effLive.pred);
-              html += '<div style="width:68px;text-align:center;"><span class="mini-pill '+liveCls+'">'+escapeHtml(effLive.pred.home)+'-'+escapeHtml(effLive.pred.away)+'</span></div>';
-              html += '<div style="width:52px;text-align:center;"><span class="mini-pill '+liveCls+'">'+livePts+'</span></div>';
+              html += '<div style="width:72px;text-align:center;"><span class="mini-pill '+liveCls+'">'+escapeHtml(effLive.pred.home)+'-'+escapeHtml(effLive.pred.away)+'</span></div>';
+              html += '<div style="width:56px;text-align:center;"><span class="mini-pill '+liveCls+'">'+livePts+'</span></div>';
             } else {
-              html += '<div style="width:68px;text-align:center;"><span class="mini-pill pill-neutral">No predijo</span></div>';
-              html += '<div style="width:52px;text-align:center;"><span class="mini-pill pill-neutral">0</span></div>';
+              html += '<div style="width:72px;text-align:center;"><span class="mini-pill pill-neutral">—</span></div>';
+              html += '<div style="width:56px;text-align:center;"><span class="mini-pill pill-neutral">0</span></div>';
             }
           } else {
             var pick = state.preseason.picks[r.profile.id];

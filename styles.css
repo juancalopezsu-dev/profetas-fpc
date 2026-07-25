@@ -168,14 +168,15 @@
   }
   .points-pill.zero{background:rgba(255,255,255,0.07); color:var(--muted);}
   .pred-pill{
-    font-family:'Oswald',sans-serif; font-size:13px; padding:5px 11px; border-radius:20px; white-space:nowrap;
+    font-family:'Oswald',sans-serif; font-size:14px; font-weight:700; padding:5px 11px; border-radius:20px; white-space:nowrap;
   }
-  .pill-green{background:rgba(47,214,115,0.30); color:var(--success-text); border:1px solid rgba(47,214,115,0.55);}
-  .pill-yellow{background:rgba(255,192,30,0.28); color:var(--gold); border:1px solid rgba(255,192,30,0.55);}
-  .pill-red{background:rgba(255,77,77,0.26); color:var(--danger); border:1px solid rgba(255,77,77,0.5);}
-  .pill-neutral{background:rgba(255,255,255,0.07); color:var(--muted); border:1px solid var(--line);}
+  /* Pastillas de acierto en color SÓLIDO (sin transparencia) para que resalten. */
+  .pill-green{background:#16C653; color:#04210E; border:1px solid #16C653;}
+  .pill-yellow{background:#FFC81E; color:#3A2A00; border:1px solid #FFC81E;}
+  .pill-red{background:#FF3B30; color:#FFFFFF; border:1px solid #FF3B30;}
+  .pill-neutral{background:rgba(255,255,255,0.10); color:var(--muted); border:1px solid var(--line);}
   .mini-pill{
-    font-family:'Oswald',sans-serif; font-size:11px; padding:4px 7px; border-radius:10px;
+    font-family:'Oswald',sans-serif; font-size:17px; font-weight:700; padding:5px 9px; border-radius:11px;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:inline-block; max-width:100%;
   }
   .empty{
@@ -193,6 +194,9 @@
   .rank.r2{color:#C9CCD1;}
   .rank.r3{color:#C98A4B;}
   .board-name{flex:1; font-size:17px; font-weight:600;}
+  /* Foto con el (primer) nombre debajo, para la tabla "Nuestra apuesta" */
+  .board-person{display:flex; flex-direction:column; align-items:center; gap:7px; margin-right:auto;}
+  .board-firstname{font-size:16px; font-weight:600; color:var(--white); max-width:96px; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .board-points{font-family:'Oswald',sans-serif; font-size:26px; font-weight:700; color:var(--gold); min-width:60px; text-align:right;}
   .board-points-label{font-size:10px; color:var(--muted); text-transform:uppercase; display:block; text-align:right;}
 
