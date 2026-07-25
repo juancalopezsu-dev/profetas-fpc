@@ -102,34 +102,41 @@ async function bsdGet(path) {
 }
 
 // Actualiza sola la tabla de posiciones REAL de la liga (la de "Liga real" en
-// la app) desde el endpoint de standings de BSD, mapeando cada equipo de BSD a
-// NUESTRO equipo. Se guarda en el mismo formato que ya usa la app
-// ('profetas/realStandings' -> {data:{teamId:{pj,pg,pe,pp,gf,gc}}}), así que
-// el admin ya no la llena a mano.
-async function updateRealStandings(db, teams) {
-  const bsdIdToOurNorm = {};
-  Object.keys(BSD_TEAM_IDS).forEach(ourNorm => { bsdIdToOurNorm[BSD_TEAM_IDS[ourNorm]] = ourNorm; });
-  const teamByNorm = {};
-  teams.forEach(t => { teamByNorm[norm(t.name)] = t; });
-
-  const json = await bsdGet('/api/leagues/' + BSD_LEAGUE + '/standings/');
-  const rows = (json && json.standings) || [];
-  if (!rows.length) return 0;
-
+// la app) SUMANDO nuestros propios partidos de la FPC ya terminados (el torneo
+// actual). Antes se traía del endpoint /api/leagues/80/standings de BSD, pero
+// ese devuelve el semestre ANTERIOR (Apertura, 19 fechas) y no el Clausura que
+// está arrancando — así la tabla nunca reflejaba el torneo en curso. Como
+// nosotros importamos todos los partidos de la FPC y BSD nos da su resultado,
+// calcularla de nuestros resultados da la tabla del torneo actual, que empieza
+// en ceros y va creciendo. Se guarda en el mismo formato que ya usa la app
+// ('profetas/realStandings' -> {data:{teamId:{pj,pg,pe,pp,gf,gc}}}).
+// Re-lee los partidos frescos para incluir los que acaban de terminar en esta
+// misma corrida (los updates de arriba ya quedaron persistidos).
+async function updateRealStandings(db) {
+  const matchesSnap = await db.collection('profetas').doc('matches').collection('matches').get();
   const data = {};
-  let mapped = 0;
-  for (const r of rows) {
-    const ourNorm = bsdIdToOurNorm[r.team_id];
-    const ourTeam = ourNorm ? teamByNorm[ourNorm] : null;
-    if (!ourTeam) continue;
-    data[ourTeam.id] = {
-      pj: r.played || 0, pg: r.won || 0, pe: r.drawn || 0, pp: r.lost || 0,
-      gf: r.gf || 0, gc: r.ga || 0
-    };
-    mapped++;
+  const ensure = id => { if (!data[id]) data[id] = { pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0 }; return data[id]; };
+  let counted = 0;
+  for (const doc of matchesSnap.docs) {
+    const m = doc.data();
+    if (matchCompetition(m) !== 'fpc') continue;
+    const finished = m.status === 'finished' || (m.status == null && m.homeScore != null);
+    if (!finished) continue;
+    if (m.homeScore == null || m.awayScore == null || !m.homeTeamId || !m.awayTeamId) continue;
+    const hs = Number(m.homeScore), as = Number(m.awayScore);
+    if (isNaN(hs) || isNaN(as)) continue;
+    const h = ensure(m.homeTeamId), a = ensure(m.awayTeamId);
+    h.pj++; a.pj++;
+    h.gf += hs; h.gc += as; a.gf += as; a.gc += hs;
+    if (hs > as) { h.pg++; a.pp++; }
+    else if (hs < as) { a.pg++; h.pp++; }
+    else { h.pe++; a.pe++; }
+    counted++;
   }
-  if (mapped) await db.collection('profetas').doc('realStandings').set({ data });
-  return mapped;
+  // Se escribe SIEMPRE (aunque quede en ceros) para borrar la tabla vieja del
+  // semestre anterior y que "Liga real" refleje solo el torneo actual.
+  await db.collection('profetas').doc('realStandings').set({ data });
+  return counted;
 }
 
 // Le pone 'visible: true' a las predicciones de un partido que ya no está
@@ -265,9 +272,10 @@ export default async function handler(req, res) {
       diagnostics.push(diag);
     }
 
-    // Paso 4: actualizar sola la tabla de posiciones real desde BSD.
+    // Paso 4: recalcular sola la tabla de posiciones real desde NUESTROS
+    // partidos FPC terminados (ya no desde BSD — ver updateRealStandings).
     let standingsMapped = 0;
-    try { standingsMapped = await updateRealStandings(db, teams); } catch (e) { /* no crítico */ }
+    try { standingsMapped = await updateRealStandings(db); } catch (e) { /* no crítico */ }
 
     res.status(200).json({ ok: true, flippedToLive, predictionsRevealed, updated: updatedCount, finished: finishedCount, standingsMapped, diagnostics });
   } catch (err) {
