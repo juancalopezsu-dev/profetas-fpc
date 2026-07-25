@@ -63,7 +63,8 @@ function ensureAuth(){
     realStandings: {},
     adminUnlocked: false,
     myId: null,
-    tab: 'predicciones',
+    tab: 'partidos',
+    partidosSub: 'porjugar',
     tablaSub: 'apuesta',
     finalizadosVisibleCount: 10
   };
@@ -758,44 +759,78 @@ function ensureAuth(){
   }
 
   /* ---------- SHELL ---------- */
+  // Íconos del bottom nav (SVG en línea, estilo app móvil). Usan currentColor
+  // para que el ítem activo se ponga dorado con solo cambiarle el color.
+  var NAV_ICONS = {
+    partidos: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 6.6l3.9 2.8-1.5 4.6H9.6L8.1 9.4z" fill="currentColor"/></svg>',
+    tabla: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="11" width="4.5" height="9" rx="1.2" fill="currentColor"/><rect x="9.75" y="4" width="4.5" height="16" rx="1.2" fill="currentColor"/><rect x="16.5" y="14" width="4.5" height="6" rx="1.2" fill="currentColor"/></svg>',
+    perfil: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" fill="currentColor"/><path d="M4 20c0-4.2 3.6-6.4 8-6.4s8 2.2 8 6.4z" fill="currentColor"/></svg>',
+    reglas: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2.2" fill="none" stroke="currentColor" stroke-width="2"/><line x1="8.3" y1="8" x2="15.7" y2="8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8.3" y1="12" x2="15.7" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8.3" y1="16" x2="12.6" y2="16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    gestionar: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2.5v3.2M12 18.3v3.2M2.5 12h3.2M18.3 12h3.2M5.2 5.2l2.2 2.2M16.6 16.6l2.2 2.2M18.8 5.2l-2.2 2.2M7.4 16.6l-2.2 2.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+  };
   var TABS = [
-    {id:'predicciones', label:'Predicciones'},
-    {id:'finalizados', label:'Finalizados'},
+    {id:'partidos', label:'Partidos'},
     {id:'tabla', label:'Tabla'},
-    {id:'pretemporada', label:'Pre-temporada'},
-    {id:'reglas', label:'Reglas'},
     {id:'perfil', label:'Mi perfil'},
+    {id:'reglas', label:'Reglas'},
     {id:'gestionar', label:'Gestionar'}
   ];
 
   function renderShell(){
     var me = profileById(state.myId);
-    document.getElementById('me-box').innerHTML = avatarHtml(me,34) + '<span class="me-name">'+escapeHtml(me?me.name:'')+'</span>';
-    var tabsEl = document.getElementById('tabs');
-    tabsEl.innerHTML = TABS.map(function(t){
-      return '<button class="tab'+(state.tab===t.id?' active':'')+'" data-tab="'+t.id+'">'+t.label+'</button>';
+    document.getElementById('me-box').innerHTML = avatarHtml(me,36) + '<span class="me-name">'+escapeHtml(me?me.name:'')+'</span>';
+    var navEl = document.getElementById('bottom-nav');
+    navEl.innerHTML = TABS.map(function(t){
+      return '<button class="nav-item'+(state.tab===t.id?' active':'')+'" data-tab="'+t.id+'">'
+        + '<span class="nav-icon">'+(NAV_ICONS[t.id]||'')+'</span>'
+        + '<span class="nav-label">'+t.label+'</span></button>';
     }).join('');
-    tabsEl.querySelectorAll('[data-tab]').forEach(function(btn){
+    navEl.querySelectorAll('[data-tab]').forEach(function(btn){
       btn.addEventListener('click', function(){
         state.tab = btn.getAttribute('data-tab');
         renderShell();
         renderView();
+        window.scrollTo(0, 0);
       });
     });
   }
 
   function renderView(){
     var el = document.getElementById('view');
-    if(state.tab==='predicciones') return renderPredicciones(el);
-    if(state.tab==='finalizados') return renderFinalizados(el);
+    if(state.tab==='partidos') return renderPartidos(el);
     if(state.tab==='tabla') return renderTabla(el);
-    if(state.tab==='pretemporada') return renderPretemporada(el);
     if(state.tab==='reglas') return renderReglas(el);
     if(state.tab==='perfil') return renderPerfil(el);
     if(state.tab==='gestionar'){
       if(!state.adminUnlocked) return renderGestionarGate(el);
       return renderGestionar(el);
     }
+  }
+
+  /* ---------- PARTIDOS (agrupa Por jugar / Finalizados / Pre-temporada) ----- */
+  // Reúne en una sola pestaña con sub-pestañas las tres secciones de partidos.
+  // Cada sub-render (renderPredicciones/renderFinalizados/renderPretemporada)
+  // ya recibe su elemento contenedor y hace su propio innerHTML + listeners,
+  // así que se les pasa el div del cuerpo y siguen funcionando igual.
+  function renderPartidos(el){
+    var sub = state.partidosSub || 'porjugar';
+    var items = [['porjugar','Por jugar'], ['finalizados','Finalizados'], ['pretemporada','Pre-temporada']];
+    var html = '<div class="subtabs">';
+    items.forEach(function(it){
+      html += '<button class="subtab'+(sub===it[0]?' active':'')+'" data-psub="'+it[0]+'">'+it[1]+'</button>';
+    });
+    html += '</div><div id="partidos-body"></div>';
+    el.innerHTML = html;
+    el.querySelectorAll('[data-psub]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        state.partidosSub = btn.getAttribute('data-psub');
+        renderPartidos(el);
+      });
+    });
+    var body = document.getElementById('partidos-body');
+    if(sub==='finalizados') return renderFinalizados(body);
+    if(sub==='pretemporada') return renderPretemporada(body);
+    return renderPredicciones(body);
   }
 
   /* ---------- PREDICCIONES ---------- */
@@ -1010,25 +1045,25 @@ function ensureAuth(){
     if(!rows.length){
       return '<div class="empty">Todavía no hay goles registrados.<br>Se llenan solos con los partidos de la FPC.</div>';
     }
-    var html = '<div style="font-size:10px; color:var(--muted); display:flex; align-items:center; padding:0 14px; margin-bottom:4px;">';
-    html += '<span style="width:28px;"></span><span style="width:38px;"></span><span style="flex:1;"></span><span style="width:44px;text-align:center;">Goles</span></div>';
+    var html = '<div style="font-size:11px; color:var(--muted); display:flex; align-items:center; padding:0 16px; margin-bottom:4px;">';
+    html += '<span style="width:30px;"></span><span style="width:46px;"></span><span style="flex:1;"></span><span style="width:52px;text-align:center;">Goles</span></div>';
     rows.forEach(function(r, i){
       var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
       html += '<div class="board-row">';
       html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
-      html += playerAvatarHtml(r, 38);
-      html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+escapeHtml(r.name)+'<div style="font-size:11px;color:var(--muted);">'+escapeHtml(r.teamName||'')+'</div></div>';
-      html += '<div style="width:44px;text-align:center;"><span class="board-points">'+r.goals+'</span></div>';
+      html += playerAvatarHtml(r, 46);
+      html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+escapeHtml(r.name)+'<div style="font-size:12px;color:var(--muted);">'+escapeHtml(r.teamName||'')+'</div></div>';
+      html += '<div style="width:52px;text-align:center;"><span class="board-points">'+r.goals+'</span></div>';
       html += '</div>';
     });
     return html;
   }
 
   function renderTabla(el){
-    var html = '<div class="tabs" style="position:static; padding:0 0 10px; margin-bottom:6px;">';
-    html += '<button class="tab'+(state.tablaSub==='apuesta'?' active':'')+'" data-sub="apuesta">Nuestra apuesta</button>';
-    html += '<button class="tab'+(state.tablaSub==='real'?' active':'')+'" data-sub="real">Liga real</button>';
-    html += '<button class="tab'+(state.tablaSub==='goleo'?' active':'')+'" data-sub="goleo">Goleo</button>';
+    var html = '<div class="subtabs">';
+    html += '<button class="subtab'+(state.tablaSub==='apuesta'?' active':'')+'" data-sub="apuesta">Nuestra apuesta</button>';
+    html += '<button class="subtab'+(state.tablaSub==='real'?' active':'')+'" data-sub="real">Liga real</button>';
+    html += '<button class="subtab'+(state.tablaSub==='goleo'?' active':'')+'" data-sub="goleo">Goleo</button>';
     html += '</div>';
 
     if(state.tablaSub==='goleo'){
@@ -1061,12 +1096,12 @@ function ensureAuth(){
       if(!rows.length){
         html += '<div class="empty">Todavía no hay jugadores.</div>';
       } else {
-        html += '<div style="font-size:9px; color:var(--muted); display:flex; align-items:center; padding:0 14px; margin-bottom:4px; gap:12px;">';
-        html += '<span style="width:28px;"></span><span style="width:38px;"></span><span style="flex:1;"></span>';
+        html += '<div style="font-size:11px; color:var(--muted); display:flex; align-items:center; padding:0 16px; margin-bottom:4px; gap:14px;">';
+        html += '<span style="width:30px;"></span><span style="width:46px;"></span><span style="flex:1;"></span>';
         if(featuredLive){
-          html += '<span style="width:64px;text-align:center;">Predicción</span><span style="width:48px;text-align:center;">Puntos</span>';
+          html += '<span style="width:68px;text-align:center;">Predicción</span><span style="width:52px;text-align:center;">Puntos</span>';
         } else {
-          html += '<span style="width:52px;text-align:center;">Goleador</span><span style="width:42px;text-align:center;">Campeón</span>';
+          html += '<span style="width:58px;text-align:center;">Goleador</span><span style="width:48px;text-align:center;">Campeón</span>';
         }
         html += '<span style="width:60px;"></span>';
         html += '</div>';
@@ -1074,7 +1109,7 @@ function ensureAuth(){
           var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
           html += '<div class="board-row'+(i===0?' top1':'')+'" data-profile-detail="'+r.profile.id+'" style="cursor:pointer;">';
           html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
-          html += avatarHtml(r.profile, 38);
+          html += avatarHtml(r.profile, 46);
           html += '<div class="board-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">'+escapeHtml(r.profile.name)+'</div>';
           if(featuredLive){
             // Durante el partido en vivo: la predicción de esa persona para
@@ -1085,11 +1120,11 @@ function ensureAuth(){
             if(effLive){
               var liveCls = predictionPillClass(featuredLive, effLive.pred);
               var livePts = pointsForPrediction(featuredLive, effLive.pred);
-              html += '<div style="width:64px;text-align:center;"><span class="mini-pill '+liveCls+'">'+escapeHtml(effLive.pred.home)+'-'+escapeHtml(effLive.pred.away)+'</span></div>';
-              html += '<div style="width:48px;text-align:center;"><span class="mini-pill '+liveCls+'">'+livePts+'</span></div>';
+              html += '<div style="width:68px;text-align:center;"><span class="mini-pill '+liveCls+'">'+escapeHtml(effLive.pred.home)+'-'+escapeHtml(effLive.pred.away)+'</span></div>';
+              html += '<div style="width:52px;text-align:center;"><span class="mini-pill '+liveCls+'">'+livePts+'</span></div>';
             } else {
-              html += '<div style="width:64px;text-align:center;"><span class="mini-pill pill-neutral">No predijo</span></div>';
-              html += '<div style="width:48px;text-align:center;"><span class="mini-pill pill-neutral">0</span></div>';
+              html += '<div style="width:68px;text-align:center;"><span class="mini-pill pill-neutral">No predijo</span></div>';
+              html += '<div style="width:52px;text-align:center;"><span class="mini-pill pill-neutral">0</span></div>';
             }
           } else {
             var pick = state.preseason.picks[r.profile.id];
@@ -1106,8 +1141,8 @@ function ensureAuth(){
               scorerPlayer = state.players.find(function(p){ return p.id===pick.scorerPlayerId || p.id==='bsd-'+pick.scorerPlayerId || p.bsdId===String(pick.scorerPlayerId); });
             }
             if(!scorerPlayer && pick && pick.scorerName){ scorerPlayer = { name: pick.scorerName, photoUrl: null }; }
-            html += '<div style="width:52px;display:flex;justify-content:center;" title="'+(pick&&pick.scorerName?escapeHtml(pick.scorerName):'')+'">'+(scorerPlayer ? playerAvatarHtml(scorerPlayer, 30) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
-            html += '<div style="width:42px;display:flex;justify-content:center;" title="'+(champT?escapeHtml(champT.name):'')+'">'+(champT ? shieldHtml(champT, 28) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
+            html += '<div style="width:58px;display:flex;justify-content:center;" title="'+(pick&&pick.scorerName?escapeHtml(pick.scorerName):'')+'">'+(scorerPlayer ? playerAvatarHtml(scorerPlayer, 36) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
+            html += '<div style="width:48px;display:flex;justify-content:center;" title="'+(champT?escapeHtml(champT.name):'')+'">'+(champT ? shieldHtml(champT, 34) : '<span style="color:var(--muted);font-size:12px;">-</span>')+'</div>';
           }
           html += '<div style="width:60px;"><div class="board-points">'+r.points+'</div><span class="board-points-label">Puntos</span></div>';
           html += '</div>';
@@ -1125,17 +1160,17 @@ function ensureAuth(){
         html += '<div class="empty">Todavía no se ha cargado la tabla real de la liga.<br>Se actualiza sola desde BSD (o a mano en Gestionar).</div>';
       } else {
         teamRows.sort(function(a,b){ return b.pts-a.pts || b.dg-a.dg; });
-        html += '<div style="font-size:10px; color:var(--muted); display:flex; padding:0 14px; margin-bottom:4px;">';
-        html += '<span style="width:28px;"></span><span style="flex:1;"></span><span style="width:28px;text-align:center;">PJ</span><span style="width:34px;text-align:center;">DG</span><span style="width:34px;text-align:center;">PTS</span></div>';
+        html += '<div style="font-size:11px; color:var(--muted); display:flex; padding:0 16px; margin-bottom:4px;">';
+        html += '<span style="width:30px;"></span><span style="flex:1;"></span><span style="width:30px;text-align:center;">PJ</span><span style="width:36px;text-align:center;">DG</span><span style="width:36px;text-align:center;">PTS</span></div>';
         teamRows.forEach(function(r, i){
           var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
           html += '<div class="board-row">';
-          html += '<div class="rank '+rankClass+'" style="font-size:14px;">'+(i+1)+'</div>';
-          html += shieldHtml(r.team, 30);
-          html += '<div class="board-name" style="font-size:13px;">'+escapeHtml(r.team.name)+'</div>';
-          html += '<span class="tabular" style="width:28px;text-align:center;font-size:13px;">'+(r.s.pj||0)+'</span>';
-          html += '<span class="tabular" style="width:34px;text-align:center;font-size:13px;">'+(r.dg>0?'+':'')+r.dg+'</span>';
-          html += '<span class="tabular" style="width:34px;text-align:center;font-size:15px;color:var(--gold);">'+r.pts+'</span>';
+          html += '<div class="rank '+rankClass+'" style="font-size:18px;">'+(i+1)+'</div>';
+          html += shieldHtml(r.team, 40);
+          html += '<div class="board-name" style="font-size:16px;">'+escapeHtml(r.team.name)+'</div>';
+          html += '<span class="tabular" style="width:30px;text-align:center;font-size:15px;">'+(r.s.pj||0)+'</span>';
+          html += '<span class="tabular" style="width:36px;text-align:center;font-size:15px;">'+(r.dg>0?'+':'')+r.dg+'</span>';
+          html += '<span class="tabular" style="width:36px;text-align:center;font-size:18px;color:var(--gold);">'+r.pts+'</span>';
           html += '</div>';
         });
       }
@@ -1502,50 +1537,76 @@ function ensureAuth(){
     var me = profileById(state.myId);
     if(!me){ el.innerHTML = '<div class="empty">No se encontró tu perfil.</div>'; return; }
 
-    var pendingPhoto = me.photo || null;
-
-    var html = '<div class="card" style="max-width:360px;margin:0 auto;">';
-    html += '<div class="section-title">Mi perfil</div>';
-    html += '<div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">';
+    var html = '';
+    // --- Foto: se cambia libremente, SIN PIN (las reglas de Firestore ya
+    // permiten que cada quien edite su propio perfil). Se guarda apenas se
+    // elige la imagen. ---
+    html += '<div class="card" style="max-width:420px;margin:0 auto;">';
+    html += '<div class="section-title">Mi foto</div>';
+    html += '<div style="display:flex;align-items:center;gap:16px;">';
     html += '<div id="perfil-photo-preview"></div>';
-    html += '<label class="btn" style="cursor:pointer;"><span id="perfil-photo-btn-label">Cambiar foto</span><input type="file" accept="image/*" id="perfil-photo-file" style="display:none;"></label>';
-    html += '</div>';
+    html += '<div style="flex:1;min-width:0;">';
+    html += '<label class="btn btn-gold" style="cursor:pointer;display:inline-block;"><span id="perfil-photo-btn-label">Cambiar foto</span><input type="file" accept="image/*" id="perfil-photo-file" style="display:none;"></label>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-top:8px;">Se guarda sola — no necesitas el PIN.</div>';
+    html += '<div id="perfil-photo-msg" style="font-size:13px;margin-top:6px;"></div>';
+    html += '</div></div></div>';
+
+    // --- Nombre y PIN: estos SÍ requieren el PIN actual para confirmar. ---
+    html += '<div class="card" style="max-width:420px;margin:0 auto;">';
+    html += '<div class="section-title">Nombre y PIN</div>';
     html += '<div class="form-row"><label>Nombre</label><input type="text" id="perfil-name" value="'+escapeHtml(me.name)+'"></div>';
-    html += '<div class="form-row"><label>PIN actual (para confirmar los cambios)</label><input type="text" id="perfil-current-pin" class="pin-input" maxlength="4" inputmode="numeric" placeholder="PIN actual"></div>';
+    html += '<div class="form-row"><label>PIN actual (para confirmar)</label><input type="text" id="perfil-current-pin" class="pin-input" maxlength="4" inputmode="numeric" placeholder="PIN actual"></div>';
     html += '<div class="form-row"><label>Nuevo PIN (déjalo vacío si no lo quieres cambiar)</label><input type="text" id="perfil-new-pin" class="pin-input" maxlength="4" inputmode="numeric" placeholder="Nuevo PIN de 4 dígitos"></div>';
-    html += '<button class="btn btn-gold" id="save-perfil-btn" style="width:100%;margin-top:8px;">Guardar cambios</button>';
-    html += '<div id="perfil-msg" style="font-size:12px;margin-top:8px;"></div>';
+    html += '<button class="btn btn-gold" id="save-perfil-btn" style="width:100%;margin-top:8px;">Guardar nombre / PIN</button>';
+    html += '<div id="perfil-msg" style="font-size:13px;margin-top:8px;"></div>';
     html += '</div>';
 
-    html += '<div class="card" style="max-width:360px;margin:0 auto;">';
+    html += '<div class="card" style="max-width:420px;margin:0 auto;">';
     html += '<button class="btn" id="ver-mis-predicciones-btn" style="width:100%;">Ver mis predicciones</button>';
     html += '</div>';
 
-    html += '<div class="card" style="max-width:360px;margin:0 auto;">';
+    html += '<div class="card" style="max-width:420px;margin:0 auto;">';
     html += '<button class="btn btn-danger" id="logout-btn" style="width:100%;">Cerrar sesión</button>';
-    html += '<div style="font-size:11px;color:var(--muted);margin-top:8px;text-align:center;">Solo cierra tu sesión en este navegador. Tus predicciones y las de todos siguen guardadas.</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center;">Solo cierra tu sesión en este navegador. Tus predicciones y las de todos siguen guardadas.</div>';
     html += '</div>';
     el.innerHTML = html;
 
     function renderPhotoPreview(){
       var previewEl = document.getElementById('perfil-photo-preview');
-      if(pendingPhoto){
-        previewEl.innerHTML = '<img class="avatar" src="'+pendingPhoto+'" style="width:64px;height:64px;">';
+      if(me.photo){
+        previewEl.innerHTML = '<img class="avatar" src="'+me.photo+'" style="width:80px;height:80px;">';
       } else {
-        previewEl.innerHTML = '<div class="avatar-fallback" style="width:64px;height:64px;">'+escapeHtml(me.name.slice(0,2).toUpperCase())+'</div>';
+        previewEl.innerHTML = '<div class="avatar-fallback" style="width:80px;height:80px;font-size:26px;">'+escapeHtml(me.name.slice(0,2).toUpperCase())+'</div>';
       }
     }
     renderPhotoPreview();
 
+    // Cambiar foto -> se procesa y se guarda de una (sin PIN).
     document.getElementById('perfil-photo-file').addEventListener('change', function(e){
       var f = e.target.files[0];
       if(!f) return;
       var labelSpan = document.getElementById('perfil-photo-btn-label');
+      var msgEl = document.getElementById('perfil-photo-msg');
+      msgEl.textContent = '';
       if(labelSpan) labelSpan.textContent = 'Procesando...';
-      resizeImageToDataUrl(f, 150).then(function(dataUrl){
-        pendingPhoto = dataUrl;
+      resizeImageToDataUrl(f, 150).then(async function(dataUrl){
+        var prev = me.photo || null;
+        me.photo = dataUrl;
         renderPhotoPreview();
-        if(labelSpan) labelSpan.textContent = 'Cambiar foto';
+        if(labelSpan) labelSpan.textContent = 'Guardando...';
+        try{
+          await saveProfile(me);
+          renderShell();
+          if(labelSpan) labelSpan.textContent = 'Cambiar foto';
+          msgEl.style.color = 'var(--success-text)';
+          msgEl.textContent = '✓ Foto actualizada';
+        }catch(err){
+          me.photo = prev;
+          renderPhotoPreview();
+          if(labelSpan) labelSpan.textContent = 'Cambiar foto';
+          msgEl.style.color = 'var(--danger)';
+          msgEl.textContent = 'No se pudo guardar la foto — revisa tu conexión.';
+        }
       }).catch(function(){
         alert('No se pudo procesar la imagen.');
         if(labelSpan) labelSpan.textContent = 'Cambiar foto';
@@ -1578,17 +1639,20 @@ function ensureAuth(){
         if(!resp.ok){
           msgEl.style.color = 'var(--danger)';
           msgEl.textContent = data.error || 'El PIN actual no es correcto.';
-          btn.disabled = false; btn.textContent = 'Guardar cambios';
+          btn.disabled = false; btn.textContent = 'Guardar nombre / PIN';
           return;
         }
         me.name = name;
-        me.photo = pendingPhoto;
         await saveProfile(me);
         renderShell();
-        renderPerfil(el);
+        msgEl.style.color = 'var(--success-text)';
+        msgEl.textContent = newPin ? '✓ Nombre y PIN actualizados' : '✓ Nombre actualizado';
+        document.getElementById('perfil-current-pin').value = '';
+        document.getElementById('perfil-new-pin').value = '';
+        btn.disabled = false; btn.textContent = 'Guardar nombre / PIN';
       }catch(e){
         alert('No se pudo guardar. Revisa tu conexión.');
-        btn.disabled = false; btn.textContent = 'Guardar cambios';
+        btn.disabled = false; btn.textContent = 'Guardar nombre / PIN';
       }
     });
 
@@ -2516,7 +2580,8 @@ function ensureAuth(){
     await signOut(auth);
     state.myId = null;
     state.adminUnlocked = false;
-    state.tab = 'predicciones';
+    state.tab = 'partidos';
+    state.partidosSub = 'porjugar';
     document.getElementById('main-shell').classList.add('hidden');
     await ensureAuth();
     // El nuevo uid anónimo es distinto al de antes — vuelve a suscribir las
