@@ -68,6 +68,10 @@ function ensureAuth(){
     tablaSub: 'apuesta',
     finalizadosVisibleCount: 10
   };
+  // Los jugadores (300 docs) solo se necesitan en Tabla y en el selector de
+  // Goleador, no en la pantalla inicial (Partidos). Se cargan diferido, la
+  // primera vez que se abre alguna de esas pantallas — ver ensurePlayersLoaded.
+  var playersWatchStarted = false;
 
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
@@ -159,6 +163,29 @@ function ensureAuth(){
       };
       reader.onerror = function(){ reject(new Error('No se pudo leer el archivo')); };
       reader.readAsDataURL(file);
+    });
+  }
+
+  // Igual que resizeImageToDataUrl pero partiendo de un data-URL ya existente
+  // (no de un File). Se usa para achicar los escudos de equipo, que estaban
+  // guardados en base64 a tamaño completo (hasta 511 KB c/u). Exporta PNG para
+  // conservar la transparencia y los bordes nítidos del escudo.
+  function resizeDataUrl(dataUrl, maxSize){
+    maxSize = maxSize || 96;
+    return new Promise(function(resolve, reject){
+      var img = new Image();
+      img.onload = function(){
+        var scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        var outW = Math.max(1, Math.round(img.width * scale));
+        var outH = Math.max(1, Math.round(img.height * scale));
+        var canvas = document.createElement('canvas');
+        canvas.width = outW; canvas.height = outH;
+        canvas.getContext('2d').drawImage(img, 0, 0, outW, outH);
+        try{ resolve(canvas.toDataURL('image/png')); }
+        catch(e){ reject(e); }
+      };
+      img.onerror = function(){ reject(new Error('No se pudo leer la imagen')); };
+      img.src = dataUrl;
     });
   }
 
@@ -392,9 +419,22 @@ function ensureAuth(){
     }
   }
 
+  // Arranca (una sola vez) el watch de la colección de jugadores. Se llama
+  // diferido desde las pantallas que sí los usan (Tabla, Pre-temporada,
+  // Gestionar), NO en loadAll, para que la carga inicial no tenga que esperar
+  // esos 300 docs. Al llegar el primer snapshot re-pinta la vista actual para
+  // que aparezcan las fotos/el selector.
+  function ensurePlayersLoaded(){
+    if(playersWatchStarted) return;
+    playersWatchStarted = true;
+    watchCollection(playersCol(), function(list){ state.players = list; }, refreshCurrentView)
+      .then(function(){ refreshCurrentView(); });
+  }
+
   async function loadAll(){
     unsubscribers.forEach(function(fn){ try{ fn(); }catch(e){} });
     unsubscribers = [];
+    playersWatchStarted = false; // se re-suscribe diferido tras limpiar los listeners
 
     var profilesPromise = watchCollection(profilesCol(), function(list){
       list.sort(function(a,b){ return a.name.localeCompare(b.name); });
@@ -404,10 +444,6 @@ function ensureAuth(){
     var teamsPromise = watchCollection(teamsCol(), function(list){
       list.sort(function(a,b){ return a.name.localeCompare(b.name); });
       state.teams = list;
-    }, refreshCurrentView);
-
-    var playersPromise = watchCollection(playersCol(), function(list){
-      state.players = list;
     }, refreshCurrentView);
 
     var matchesPromise = watchCollection(matchesCol(), function(list){
@@ -440,7 +476,7 @@ function ensureAuth(){
       state.realStandings = (data && data.data) || {};
     }, refreshCurrentView);
 
-    await Promise.all([profilesPromise, teamsPromise, playersPromise, matchesPromise, predictionsPromise, preseasonPromise, realStandingsPromise]);
+    await Promise.all([profilesPromise, teamsPromise, matchesPromise, predictionsPromise, preseasonPromise, realStandingsPromise]);
 
     if(!state.profiles.length){
       var legacyProfilesDoc = await loadDoc('profiles', null);
@@ -750,6 +786,27 @@ function ensureAuth(){
         var newP = { id: data.profileId, name: name, photo: pendingPhoto, ownerUid: data.profileId };
         await saveProfile(newP);
         state.myId = newP.id;
+        // Si la pre-temporada YA está cerrada, al perfil nuevo se le copia el
+        // pronóstico del bot "Carlos Antonio Vélez" (campeón + goleador), para
+        // que no entre sin nada elegido. Las reglas de Firestore permiten esta
+        // escritura porque solo toca la entrada propia (picks[su propio uid]).
+        // Si falla por lo que sea, el perfil simplemente queda sin pronóstico —
+        // no se bloquea la entrada.
+        try{
+          var psLocked = !!(state.preseason.picksLocked || (state.preseason.result && state.preseason.result.locked));
+          var newBotId = getBotProfileId();
+          var newBotPick = newBotId ? state.preseason.picks[newBotId] : null;
+          if(psLocked && newBotPick && newBotPick.championTeamId && newBotPick.scorerPlayerId && !state.preseason.picks[newP.id]){
+            state.preseason.picks[newP.id] = {
+              championTeamId: newBotPick.championTeamId,
+              scorerName: newBotPick.scorerName,
+              scorerPlayerId: newBotPick.scorerPlayerId,
+              scorerTeamId: newBotPick.scorerTeamId,
+              auto: true
+            };
+            await savePreseason();
+          }
+        }catch(e){ /* el perfil queda sin pronóstico; no bloquea la entrada */ }
         showMain();
       }catch(e){
         alert('No se pudo crear el perfil. Revisa tu conexión.');
@@ -1064,6 +1121,7 @@ function ensureAuth(){
   function firstName(n){ return ((n||'').trim().split(/\s+/)[0]) || (n||''); }
 
   function renderTabla(el){
+    ensurePlayersLoaded(); // fotos de goleador y pestaña Goleo
     var html = '<div class="subtabs">';
     html += '<button class="subtab'+(state.tablaSub==='apuesta'?' active':'')+'" data-sub="apuesta">Nuestra apuesta</button>';
     html += '<button class="subtab'+(state.tablaSub==='real'?' active':'')+'" data-sub="real">Liga real</button>';
@@ -1428,6 +1486,7 @@ function ensureAuth(){
 
   /* ---------- PRETEMPORADA ---------- */
   function renderPretemporada(el){
+    ensurePlayersLoaded(); // selector de Goleador
     var locked = !!(state.preseason.picksLocked || (state.preseason.result && state.preseason.result.locked));
     var myPick = state.preseason.picks[state.myId] || {championTeamId:'', scorerName:'', scorerPlayerId:null};
     var pendingScorerPlayer = myPick.scorerPlayerId ? state.players.find(function(pl){ return pl.id===myPick.scorerPlayerId; }) : null;
@@ -1744,6 +1803,7 @@ function ensureAuth(){
 
   /* ---------- GESTIONAR ---------- */
   function renderGestionar(el){
+    ensurePlayersLoaded(); // selector de goleador del bot + contador de jugadores
     // Solo una sesión de administrador puede crear el perfil del bot o
     // escribir sus predicciones (ver comentarios en ensureBotProfile /
     // fillMissingBotPredictions) — se dispara aquí, no en loadAll(), para
@@ -1899,6 +1959,20 @@ function ensureAuth(){
     html += '<div class="auto-fetch-row">';
     html += '<button class="btn" id="update-players-btn">Actualizar jugadores</button>';
     html += '<span id="update-players-status" style="font-size:11px;color:var(--muted);"></span>';
+    html += '</div>';
+    html += '</div>';
+
+    // Optimizar escudos: los logos de equipo estaban guardados en base64 a
+    // tamaño completo (~1.8 MB en total), lo que hacía lenta la carga inicial.
+    // Este botón los reduce a 96px y los vuelve a guardar (una sola vez).
+    var logoBytes = state.teams.reduce(function(s,t){ return s + ((t.logoUrl && t.logoUrl.indexOf('data:')===0) ? t.logoUrl.length : 0); }, 0);
+    var heavyLogos = state.teams.filter(function(t){ return t.logoUrl && t.logoUrl.indexOf('data:')===0 && t.logoUrl.length > 30000; }).length;
+    html += '<div class="card">';
+    html += '<div class="section-title">Optimizar escudos (acelerar la app)</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Los escudos ocupan hoy <b>'+Math.round(logoBytes/1024)+' KB</b> ('+heavyLogos+' sin optimizar). Este botón los achica y los vuelve a guardar para que la app abra más rápido. <b>Hazlo una sola vez.</b> No afecta cómo se ven.</div>';
+    html += '<div class="auto-fetch-row">';
+    html += '<button class="btn" id="optimizar-escudos-btn"'+(logoBytes?'':' disabled')+'>Optimizar escudos</button>';
+    html += '<span id="optimizar-escudos-status" style="font-size:11px;color:var(--muted);"></span>';
     html += '</div>';
     html += '</div>';
 
@@ -2122,6 +2196,36 @@ function ensureAuth(){
       try{ await updatePlayersFromBSD(statusEl); }
       finally{ btn.disabled = false; }
     });
+
+    var optEscudosBtn = document.getElementById('optimizar-escudos-btn');
+    if(optEscudosBtn){
+      optEscudosBtn.addEventListener('click', async function(){
+        var btn = this;
+        var statusEl = document.getElementById('optimizar-escudos-status');
+        var conLogo = state.teams.filter(function(t){ return t.logoUrl && t.logoUrl.indexOf('data:')===0; });
+        if(!conLogo.length){ statusEl.textContent = 'No hay escudos en base64 que optimizar.'; return; }
+        btn.disabled = true;
+        var antes = 0, despues = 0, guardados = 0, i;
+        for(i=0;i<conLogo.length;i++){
+          var t = conLogo[i];
+          statusEl.textContent = 'Optimizando '+(i+1)+'/'+conLogo.length+'...';
+          antes += t.logoUrl.length;
+          try{
+            var small = await resizeDataUrl(t.logoUrl, 96);
+            // Solo se guarda si de verdad quedó más liviano (no re-inflar).
+            if(small && small.length < t.logoUrl.length){
+              t.logoUrl = small;
+              await saveTeam(t);
+              guardados++;
+            }
+          }catch(e){ /* si un escudo falla, seguimos con los demás */ }
+          despues += t.logoUrl.length;
+        }
+        btn.disabled = false;
+        statusEl.textContent = 'Listo: '+guardados+'/'+conLogo.length+' optimizados. '+Math.round(antes/1024)+' KB → '+Math.round(despues/1024)+' KB.';
+        renderGestionar(el);
+      });
+    }
 
     document.getElementById('import-matches-btn').addEventListener('click', async function(){
       var btn = this;
