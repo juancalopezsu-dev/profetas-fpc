@@ -508,6 +508,31 @@ function ensureAuth(){
   function getBotProfile(){ return state.profiles.find(function(p){ return p.isBot; }); }
   function getBotProfileId(){ var b = getBotProfile(); return b ? b.id : null; }
 
+  // Si la pre-temporada ya está cerrada y este perfil no tiene pronóstico, le
+  // copia el del bot "Carlos Antonio Vélez" (campeón + goleador). Cada quien
+  // puede escribir su PROPIA entrada de picks (las reglas lo permiten), así que
+  // sirve tanto al crear el perfil como al iniciar sesión — así se ponen al día
+  // los que entraron después del cierre. Si falla, no bloquea la entrada.
+  async function assignBotPickIfMissing(profileId){
+    try{
+      var locked = !!(state.preseason.picksLocked || (state.preseason.result && state.preseason.result.locked));
+      if(!locked) return;
+      var existing = state.preseason.picks[profileId];
+      if(existing && existing.championTeamId) return;
+      var botId = getBotProfileId();
+      var botPick = botId ? state.preseason.picks[botId] : null;
+      if(!botPick || !botPick.championTeamId || !botPick.scorerPlayerId) return;
+      state.preseason.picks[profileId] = {
+        championTeamId: botPick.championTeamId,
+        scorerName: botPick.scorerName,
+        scorerPlayerId: botPick.scorerPlayerId,
+        scorerTeamId: botPick.scorerTeamId,
+        auto: true
+      };
+      await savePreseason();
+    }catch(e){ /* no bloquea la entrada */ }
+  }
+
   // Solo se puede llamar desde una sesión de administrador: crear el perfil
   // del bot es una escritura de perfil cuyo 'ownerUid' nunca va a coincidir
   // con el auth.uid de quien la haga (el bot no inicia sesión con PIN), así
@@ -738,6 +763,7 @@ function ensureAuth(){
           // de antes de iniciar sesión (ver comentario en loadAll()).
           await loadAll();
           state.myId = pid;
+          await assignBotPickIfMissing(pid);
           showMain();
         }catch(e){
           alert('No se pudo iniciar sesión. Revisa tu conexión.');
@@ -786,27 +812,9 @@ function ensureAuth(){
         var newP = { id: data.profileId, name: name, photo: pendingPhoto, ownerUid: data.profileId };
         await saveProfile(newP);
         state.myId = newP.id;
-        // Si la pre-temporada YA está cerrada, al perfil nuevo se le copia el
-        // pronóstico del bot "Carlos Antonio Vélez" (campeón + goleador), para
-        // que no entre sin nada elegido. Las reglas de Firestore permiten esta
-        // escritura porque solo toca la entrada propia (picks[su propio uid]).
-        // Si falla por lo que sea, el perfil simplemente queda sin pronóstico —
-        // no se bloquea la entrada.
-        try{
-          var psLocked = !!(state.preseason.picksLocked || (state.preseason.result && state.preseason.result.locked));
-          var newBotId = getBotProfileId();
-          var newBotPick = newBotId ? state.preseason.picks[newBotId] : null;
-          if(psLocked && newBotPick && newBotPick.championTeamId && newBotPick.scorerPlayerId && !state.preseason.picks[newP.id]){
-            state.preseason.picks[newP.id] = {
-              championTeamId: newBotPick.championTeamId,
-              scorerName: newBotPick.scorerName,
-              scorerPlayerId: newBotPick.scorerPlayerId,
-              scorerTeamId: newBotPick.scorerTeamId,
-              auto: true
-            };
-            await savePreseason();
-          }
-        }catch(e){ /* el perfil queda sin pronóstico; no bloquea la entrada */ }
+        // Si la pre-temporada ya está cerrada, se le copia el pronóstico del
+        // bot para que no entre sin nada (ver assignBotPickIfMissing).
+        await assignBotPickIfMissing(newP.id);
         showMain();
       }catch(e){
         alert('No se pudo crear el perfil. Revisa tu conexión.');
@@ -2065,6 +2073,25 @@ function ensureAuth(){
     html += '<div class="section-title">Pre-temporada</div>';
     var picksLocked = !!state.preseason.picksLocked;
     var resultLocked = !!(state.preseason.result && state.preseason.result.locked);
+    // Rellenar con el pronóstico del bot a los perfiles que quedaron SIN nada
+    // (ej. los que entraron después del cierre). Los perfiles nuevos ya lo
+    // reciben solos al entrar; esto es para ponerse al día con los que ya
+    // estaban sin pick. Aparece siempre que la pre-temporada esté cerrada.
+    if(picksLocked){
+      var backfillBotId = getBotProfileId();
+      var backfillBotPick = backfillBotId ? state.preseason.picks[backfillBotId] : null;
+      var sinPronostico = state.profiles.filter(function(p){ return !p.isBot && (!state.preseason.picks[p.id] || !state.preseason.picks[p.id].championTeamId); });
+      if(sinPronostico.length){
+        html += '<div style="background:rgba(255,192,30,0.12);border:1px solid rgba(255,192,30,0.45);border-radius:10px;padding:12px;margin-bottom:14px;">';
+        html += '<div style="font-size:13px;margin-bottom:8px;">Hay <b>'+sinPronostico.length+'</b> perfil(es) sin pronóstico: '+sinPronostico.map(function(p){ return escapeHtml(p.name); }).join(', ')+'.</div>';
+        if(backfillBotPick && backfillBotPick.championTeamId && backfillBotPick.scorerPlayerId){
+          html += '<button class="btn btn-gold" id="backfill-bot-picks-btn">Copiarles el pronóstico de Carlos Antonio Vélez</button>';
+        } else {
+          html += '<div class="locked-note">Primero guarda el pronóstico del bot (más arriba) para poder copiárselo.</div>';
+        }
+        html += '</div>';
+      }
+    }
     if(resultLocked){
       html += '<div class="locked-note">Ya se cerró y se calificó la pre-temporada.</div>';
       html += '<button class="btn" id="reopen-preseason" style="margin-top:10px;">Reabrir pronósticos</button>';
@@ -2582,6 +2609,36 @@ function ensureAuth(){
         });
         await saveRealStandings();
         renderGestionar(el);
+      });
+    }
+
+    var backfillBtn = document.getElementById('backfill-bot-picks-btn');
+    if(backfillBtn){
+      backfillBtn.addEventListener('click', async function(){
+        var btn = this;
+        var bId = getBotProfileId();
+        var bPick = bId ? state.preseason.picks[bId] : null;
+        if(!bPick || !bPick.championTeamId || !bPick.scorerPlayerId){ alert('Primero guarda el pronóstico del bot (más arriba).'); return; }
+        var faltan = state.profiles.filter(function(p){ return !p.isBot && (!state.preseason.picks[p.id] || !state.preseason.picks[p.id].championTeamId); });
+        if(!faltan.length){ renderGestionar(el); return; }
+        if(!confirm('¿Copiar el pronóstico de Carlos Antonio Vélez a '+faltan.length+' perfil(es) ('+faltan.map(function(p){ return p.name; }).join(', ')+')?')) return;
+        btn.disabled = true; btn.textContent = 'Copiando...';
+        faltan.forEach(function(p){
+          state.preseason.picks[p.id] = {
+            championTeamId: bPick.championTeamId,
+            scorerName: bPick.scorerName,
+            scorerPlayerId: bPick.scorerPlayerId,
+            scorerTeamId: bPick.scorerTeamId,
+            auto: true
+          };
+        });
+        try{
+          await savePreseason();
+          renderGestionar(el);
+        }catch(err){
+          alert('No se pudo guardar. Revisa tu conexión.');
+          btn.disabled = false; btn.textContent = 'Copiarles el pronóstico de Carlos Antonio Vélez';
+        }
       });
     }
 
