@@ -574,18 +574,30 @@ function ensureAuth(){
     var botId = getBotProfileId();
     if(!botId) return 0;
     var filled = 0;
-    var writes = [];
-    state.matches.forEach(function(m){
+    for(var i=0;i<state.matches.length;i++){
+      var m = state.matches[i];
       if(!state.predictions[m.id]) state.predictions[m.id] = {};
-      if(!state.predictions[m.id][botId]){
-        var score = randomBotScore();
-        var pred = { home: String(score.home), away: String(score.away), ownerUid: botId };
-        state.predictions[m.id][botId] = pred;
-        writes.push(savePrediction(m.id, botId, pred));
-        filled++;
+      if(state.predictions[m.id][botId]) continue; // ya la tenemos cargada
+      // IMPORTANTE: la sesión de admin NO carga las predicciones del bot de los
+      // partidos PROGRAMADOS (no son 'visible' ni suyas — ver la consulta en
+      // loadAll). Si nos fiáramos solo de state.predictions, creeríamos que
+      // faltan y le generaríamos un marcador NUEVO al azar cada vez que se
+      // abre Gestionar, cambiándole la predicción al bot (y por lo tanto la
+      // predicción automática que ve quien no predijo). Por eso se lee el doc
+      // directo — el admin SÍ puede leerlo — y solo se crea si de verdad no
+      // existe. Si la lectura falla, NO se crea (mejor eso que re-randomizar).
+      var existing = null;
+      try{ existing = await getDoc(doc(db,'profetas','matches','matches',m.id,'predictions',botId)); }
+      catch(e){ continue; }
+      if(existing && existing.exists && existing.exists()){
+        state.predictions[m.id][botId] = existing.data();
+        continue;
       }
-    });
-    if(writes.length){ await Promise.all(writes); }
+      var score = randomBotScore();
+      var pred = { home: String(score.home), away: String(score.away), ownerUid: botId };
+      state.predictions[m.id][botId] = pred;
+      try{ await savePrediction(m.id, botId, pred); filled++; }catch(e){}
+    }
     return filled;
   }
 
@@ -924,18 +936,26 @@ function ensureAuth(){
     }
     el.innerHTML = html;
 
-    // Auto-guardado: apenas el marcador esté completo (ambos números), se
-    // guarda solo al salir del campo (evento 'change'), sin botón. No se
-    // vuelve a pintar toda la pestaña para no perder el foco si sigues
-    // escribiendo; solo se muestra "✓ Guardado" en la tarjeta.
+    // Auto-guardado, sin botón: apenas el marcador esté completo (ambos
+    // números) se guarda solo. Se escucha 'input' (cada tecla, con un pequeño
+    // retardo) ADEMÁS de 'change' y 'blur', porque en el celular 'change' solo
+    // dispara al salir del campo y a veces no llega (teclado "Listo", cambiar
+    // de pestaña, etc.) — por eso antes había gente que creía haber predicho y
+    // no se guardaba. Nunca guarda vacío ni borra (merge), así que una vez
+    // guardado el marcador no se pierde. Solo muestra "✓ Guardado" en la
+    // tarjeta, sin re-pintar (para no perder el foco si sigues escribiendo).
     el.querySelectorAll('[data-pred-home]').forEach(function(homeInput){
       var mid = homeInput.getAttribute('data-pred-home');
       var awayInput = el.querySelector('[data-pred-away="'+mid+'"]');
       var statusEl = el.querySelector('[data-pred-status="'+mid+'"]');
       if(!awayInput) return;
+      var lastSaved = null, saveTimer = null;
       async function trySave(){
         var h = homeInput.value, a = awayInput.value;
         if(h===''||a===''){ return; } // todavía incompleto, no guarda
+        var key = h+'-'+a;
+        if(key === lastSaved){ return; } // ya guardado ese mismo marcador
+        lastSaved = key;
         if(statusEl){ statusEl.textContent = 'Guardando…'; statusEl.style.color = 'var(--muted)'; }
         if(!state.predictions[mid]) state.predictions[mid] = {};
         var pred = { home:h, away:a, ownerUid: state.myId };
@@ -944,11 +964,17 @@ function ensureAuth(){
           await savePrediction(mid, state.myId, pred);
           if(statusEl){ statusEl.textContent = '✓ Guardado'; statusEl.style.color = 'var(--success-text)'; }
         }catch(e){
+          lastSaved = null; // permite reintentar el mismo marcador
           if(statusEl){ statusEl.textContent = 'No se pudo guardar — revisa tu conexión'; statusEl.style.color = 'var(--danger)'; }
         }
       }
+      function scheduleSave(){ if(saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(trySave, 500); }
+      homeInput.addEventListener('input', scheduleSave);
+      awayInput.addEventListener('input', scheduleSave);
       homeInput.addEventListener('change', trySave);
       awayInput.addEventListener('change', trySave);
+      homeInput.addEventListener('blur', trySave);
+      awayInput.addEventListener('blur', trySave);
     });
 
     el.querySelectorAll('[data-show-match-preds]').forEach(function(btn){
@@ -1179,7 +1205,8 @@ function ensureAuth(){
           var rankClass = i===0?'r1':(i===1?'r2':(i===2?'r3':''));
           html += '<div class="board-row'+(i===0?' top1':'')+'" data-profile-detail="'+r.profile.id+'" style="cursor:pointer;">';
           html += '<div class="rank '+rankClass+'">'+(i+1)+'</div>';
-          html += '<div class="board-person">'+avatarHtml(r.profile, 46)+'<span class="board-firstname">'+escapeHtml(firstName(r.profile.name))+'</span></div>';
+          var personLabel = r.profile.isBot ? 'CAV' : firstName(r.profile.name);
+          html += '<div class="board-person">'+avatarHtml(r.profile, 46)+'<span class="board-firstname">'+escapeHtml(personLabel)+'</span></div>';
           if(featuredLive){
             // Durante el partido en vivo: la predicción de esa persona para
             // ESTE partido (pastilla de color según cómo va) y, en columna
