@@ -303,10 +303,32 @@
   .goal-row:last-child{border-bottom:none;}
   .goals-list .goal-row{justify-content:center; border-bottom:none; padding:2px 0;}
 
-  /* Pantalla de carga inicial */
+  /* Pantalla de carga inicial: siglas FPC grandes con un punto que salta
+     entre las letras (reemplaza el spinner). */
   .boot-loading{
     position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
-    gap:14px; background:var(--bg); z-index:50;
+    gap:18px; background:var(--bg); z-index:50;
+  }
+  .fpc-loader{ position:relative; display:flex; justify-content:center; padding-top:44px; }
+  .fpc-letter{
+    font-family:'Oswald',sans-serif; font-weight:700; font-size:72px; line-height:1;
+    color:var(--gold); width:56px; text-align:center;
+  }
+  .fpc-ball{
+    position:absolute; top:30px; left:21px; width:15px; height:15px; border-radius:50%;
+    background:var(--white); box-shadow:0 0 12px rgba(255,192,30,0.75);
+    animation:fpc-hop 1.8s infinite ease-in-out;
+  }
+  @keyframes fpc-hop{
+    0%   { transform: translate(0,0); }
+    12.5%{ transform: translate(28px,-30px); }
+    25%  { transform: translate(56px,0); }
+    37.5%{ transform: translate(84px,-30px); }
+    50%  { transform: translate(112px,0); }
+    62.5%{ transform: translate(84px,-30px); }
+    75%  { transform: translate(56px,0); }
+    87.5%{ transform: translate(28px,-30px); }
+    100% { transform: translate(0,0); }
   }
   .boot-loading-text{color:var(--muted); font-size:13px;}
   .spinner-lg{width:32px; height:32px; border-width:3px;}
