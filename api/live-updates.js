@@ -101,6 +101,20 @@ async function bsdGet(path) {
   return r.json();
 }
 
+// Deriva el marcador a partir de los goles ya parseados. Se usa como RESPALDO
+// cuando BSD no trae home_score/away_score mientras el partido está EN VIVO
+// (manda las incidencias/goles pero deja el marcador corrido en null hasta que
+// termina) — ese era el bug del 0-0 congelado. Un autogol cuenta para el rival:
+// (team==='home') !== own  ->  true = va para el local.
+function scoreFromGoals(goals) {
+  let h = 0, a = 0;
+  (goals || []).forEach(g => {
+    const own = g.goalType === 'own';
+    if ((g.team === 'home') !== own) h++; else a++;
+  });
+  return { h, a };
+}
+
 // Actualiza sola la tabla de posiciones REAL de la liga (la de "Liga real" en
 // la app) SUMANDO nuestros propios partidos de la FPC ya terminados (el torneo
 // actual). Antes se traía del endpoint /api/leagues/80/standings de BSD, pero
@@ -135,7 +149,10 @@ async function updateRealStandings(db) {
   }
   // Se escribe SIEMPRE (aunque quede en ceros) para borrar la tabla vieja del
   // semestre anterior y que "Liga real" refleje solo el torneo actual.
-  await db.collection('profetas').doc('realStandings').set({ data });
+  // 'updatedAt' es un latido: como esto corre al final de CADA ejecución de
+  // live-updates, sirve para saber (leyendo el doc) si el cron está corriendo.
+  // El cliente ignora este campo (solo lee .data).
+  await db.collection('profetas').doc('realStandings').set({ data, updatedAt: Date.now() });
   return counted;
 }
 
@@ -191,24 +208,16 @@ export default async function handler(req, res) {
       }
     }
 
-    // Recargar si algo cambió, para el paso 2 y 3.
+    // Recargar si algo cambió en el paso 1, para el paso 2.
     const freshSnap = flippedToLive
       ? await db.collection('profetas').doc('matches').collection('matches').get()
       : matchesSnap;
 
-    // Paso 2: revelar predicciones de los que ya no están 'scheduled'.
-    let predictionsRevealed = 0;
-    for (const matchDoc of freshSnap.docs) {
-      const m = matchDoc.data();
-      const st = matchStatusComputed(m);
-      if (st === 'scheduled') continue;
-      if (st === 'finished' && m.predictionsFullyRevealed === true) continue;
-      predictionsRevealed += await revealPredictions(matchDoc);
-      if (st === 'finished') { try { await matchDoc.ref.update({ predictionsFullyRevealed: true }); } catch (e) {} }
-    }
-
-    // Paso 3: para cada partido FPC no terminado, pedirle a BSD marcador +
-    // goles + estado.
+    // Paso 2: para cada partido FPC no terminado, pedirle a BSD marcador +
+    // goles + estado. (La revelación de predicciones se hace DESPUÉS, en el
+    // paso 3, para que un partido que pasa a 'live' en esta misma corrida ya
+    // revele — antes se revelaba una corrida después, y si el cron corría poco
+    // durante el partido las predicciones quedaban ocultas todo el juego.)
     let updatedCount = 0, finishedCount = 0;
     for (const matchDoc of freshSnap.docs) {
       const m = matchDoc.data();
@@ -249,8 +258,18 @@ export default async function handler(req, res) {
 
         const updates = { goals };
         if (bsdMatchId && bsdMatchId !== m.bsdMatchId) updates.bsdMatchId = bsdMatchId;
-        if (detail.home_score != null) updates.homeScore = detail.home_score;
-        if (detail.away_score != null) updates.awayScore = detail.away_score;
+        // Marcador: se prefiere el de BSD (autoritativo al terminar), pero si en
+        // VIVO viene null (BSD manda los goles pero no el marcador corrido), se
+        // deriva de los goles — así el marcador ya no se queda congelado en 0-0.
+        // En 'scheduled' no se toca el marcador (para no escribir 0 de más).
+        if (newStatus !== 'scheduled') {
+          const derived = scoreFromGoals(goals);
+          updates.homeScore = detail.home_score != null ? detail.home_score : derived.h;
+          updates.awayScore = detail.away_score != null ? detail.away_score : derived.a;
+        } else {
+          if (detail.home_score != null) updates.homeScore = detail.home_score;
+          if (detail.away_score != null) updates.awayScore = detail.away_score;
+        }
         updates.status = newStatus;
         if (newStatus === 'finished') finishedCount++;
         // Corregir la hora de inicio desde BSD (que la trae bien) mientras el
@@ -270,6 +289,22 @@ export default async function handler(req, res) {
         diag.result = 'ERROR: ' + String(e);
       }
       diagnostics.push(diag);
+    }
+
+    // Paso 3: revelar (visible:true) las predicciones de los partidos que ya no
+    // están 'scheduled'. Se hace DESPUÉS de actualizar los estados y con un
+    // snapshot fresco, para que un partido que pasó a 'live' en ESTA corrida ya
+    // revele — antes esto corría antes de flipear el estado y se revelaba una
+    // corrida tarde (por eso las predicciones se veían "—" durante el vivo).
+    let predictionsRevealed = 0;
+    const revealSnap = await db.collection('profetas').doc('matches').collection('matches').get();
+    for (const matchDoc of revealSnap.docs) {
+      const m = matchDoc.data();
+      const st = matchStatusComputed(m);
+      if (st === 'scheduled') continue;
+      if (st === 'finished' && m.predictionsFullyRevealed === true) continue;
+      predictionsRevealed += await revealPredictions(matchDoc);
+      if (st === 'finished') { try { await matchDoc.ref.update({ predictionsFullyRevealed: true }); } catch (e) {} }
     }
 
     // Paso 4: recalcular sola la tabla de posiciones real desde NUESTROS
