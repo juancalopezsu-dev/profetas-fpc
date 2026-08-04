@@ -124,15 +124,14 @@ function scoreFromGoals(goals) {
 // calcularla de nuestros resultados da la tabla del torneo actual, que empieza
 // en ceros y va creciendo. Se guarda en el mismo formato que ya usa la app
 // ('profetas/realStandings' -> {data:{teamId:{pj,pg,pe,pp,gf,gc}}}).
-// Re-lee los partidos frescos para incluir los que acaban de terminar en esta
-// misma corrida (los updates de arriba ya quedaron persistidos).
-async function updateRealStandings(db) {
-  const matchesSnap = await db.collection('profetas').doc('matches').collection('matches').get();
+// Recibe los partidos YA leídos (con los updates de esta corrida aplicados en
+// memoria) para no volver a leer la colección — releerla aquí cada corrida
+// disparaba las lecturas de Firestore por encima del límite gratis.
+async function updateRealStandings(db, matchDatas) {
   const data = {};
   const ensure = id => { if (!data[id]) data[id] = { pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0 }; return data[id]; };
   let counted = 0;
-  for (const doc of matchesSnap.docs) {
-    const m = doc.data();
+  for (const m of matchDatas) {
     if (matchCompetition(m) !== 'fpc') continue;
     const finished = m.status === 'finished' || (m.status == null && m.homeScore != null);
     if (!finished) continue;
@@ -159,8 +158,8 @@ async function updateRealStandings(db) {
 // Le pone 'visible: true' a las predicciones de un partido que ya no está
 // 'scheduled'. Se salta las que ya estaban en true. Un partido 'finished' con
 // predictionsFullyRevealed:true ya no se relee (ahorra lecturas).
-async function revealPredictions(matchDoc) {
-  const predsSnap = await matchDoc.ref.collection('predictions').get();
+async function revealPredictions(matchRef) {
+  const predsSnap = await matchRef.collection('predictions').get();
   let revealed = 0;
   for (const predDoc of predsSnap.docs) {
     if (predDoc.data().visible !== true) {
@@ -186,46 +185,50 @@ export default async function handler(req, res) {
     const db = getDb();
     const now = Date.now();
 
+    // Se lee la colección de partidos (y equipos) UNA sola vez y se reusa: antes
+    // se releía la de partidos hasta 3 veces por corrida —inicio, reveal y
+    // standings— lo que disparaba las lecturas de Firestore por encima del
+    // límite gratis y terminaba tumbando el cron. Cada update se aplica también
+    // al objeto en memoria (item.data) para no tener que volver a leer.
     const matchesSnap = await db.collection('profetas').doc('matches').collection('matches').get();
     const teamsSnap = await db.collection('profetas').doc('teams').collection('teams').get();
     const teams = teamsSnap.docs.map(d => d.data());
     const teamById = id => teams.find(t => t.id === id);
+    const matchList = matchesSnap.docs.map(d => ({ ref: d.ref, id: d.id, data: d.data() }));
 
-    // Paso 1: pasar a 'live' por tiempo (sin llamar a BSD) SOLO para partidos
-    // que no tienen bsdMatchId (ej. 'mundial' o creados a mano sin enlazar).
-    // Los partidos enlazados a BSD reciben su estado directo de BSD en el
-    // Paso 3 — no se disparan por nuestro reloj, porque si la hora guardada
-    // está mal se pasarían a 'live' antes de tiempo.
+    // Paso 1: pasar a 'live' por tiempo (sin BSD) SOLO los partidos SIN
+    // bsdMatchId (mundial o creados a mano sin enlazar). Los enlazados reciben
+    // su estado directo de BSD en el Paso 2.
     let flippedToLive = 0;
-    for (const matchDoc of matchesSnap.docs) {
-      const m = matchDoc.data();
+    for (const item of matchList) {
+      const m = item.data;
       if (m.bsdMatchId) continue;
       if (matchStatusComputed(m) === 'scheduled' && m.kickoff && m.kickoff <= now) {
         const updates = { status: 'live' };
         if (m.homeScore == null) updates.homeScore = 0;
         if (m.awayScore == null) updates.awayScore = 0;
-        try { await matchDoc.ref.update(updates); flippedToLive++; } catch (e) {}
+        try { await item.ref.update(updates); Object.assign(item.data, updates); flippedToLive++; } catch (e) {}
       }
     }
 
-    // Recargar si algo cambió en el paso 1, para el paso 2.
-    const freshSnap = flippedToLive
-      ? await db.collection('profetas').doc('matches').collection('matches').get()
-      : matchesSnap;
-
-    // Paso 2: para cada partido FPC no terminado, pedirle a BSD marcador +
-    // goles + estado. (La revelación de predicciones se hace DESPUÉS, en el
-    // paso 3, para que un partido que pasa a 'live' en esta misma corrida ya
-    // revele — antes se revelaba una corrida después, y si el cron corría poco
-    // durante el partido las predicciones quedaban ocultas todo el juego.)
+    // Paso 2: pedirle a BSD marcador + goles + estado, pero SOLO de los partidos
+    // relevantes: en vivo, o programados cuya hora ya llegó / está por llegar
+    // (hasta 20 min antes). Los programados a futuro lejano se saltan — no hace
+    // falta consultarlos cada 2 min y así la función corre en ~1-2s en vez de
+    // ~6s, evitando que el cron se pase de tiempo. La revelación de predicciones
+    // se hace DESPUÉS (Paso 3) para que un partido que pasa a 'live' en esta
+    // misma corrida ya revele.
+    const POLL_BEFORE_MS = 20 * 60 * 1000;
     let updatedCount = 0, finishedCount = 0;
-    for (const matchDoc of freshSnap.docs) {
-      const m = matchDoc.data();
+    for (const item of matchList) {
+      const m = item.data;
       if (matchCompetition(m) !== 'fpc') continue;
-      if (matchStatusComputed(m) === 'finished') continue;
+      const stNow = matchStatusComputed(m);
+      if (stNow === 'finished') continue;
+      if (stNow === 'scheduled' && m.kickoff && (m.kickoff - now) > POLL_BEFORE_MS) continue;
 
       const home = teamById(m.homeTeamId), away = teamById(m.awayTeamId);
-      const diag = { id: matchDoc.id, teams: (home ? home.name : '?') + ' vs ' + (away ? away.name : '?'), bsdMatchId: m.bsdMatchId || null };
+      const diag = { id: item.id, teams: (home ? home.name : '?') + ' vs ' + (away ? away.name : '?'), bsdMatchId: m.bsdMatchId || null };
 
       try {
         // 1) conseguir el detalle del partido en BSD.
@@ -281,7 +284,8 @@ export default async function handler(req, res) {
           if (!isNaN(bsdKickoff) && bsdKickoff !== m.kickoff) updates.kickoff = bsdKickoff;
         }
 
-        await matchDoc.ref.update(updates);
+        await item.ref.update(updates);
+        Object.assign(item.data, updates); // reflejar en memoria para el reveal y las standings
         updatedCount++;
         diag.result = 'ok'; diag.bsdStatus = detail.status; diag.mapped = newStatus;
         diag.score = (detail.home_score) + '-' + (detail.away_score); diag.goals = goals.length;
@@ -292,25 +296,26 @@ export default async function handler(req, res) {
     }
 
     // Paso 3: revelar (visible:true) las predicciones de los partidos que ya no
-    // están 'scheduled'. Se hace DESPUÉS de actualizar los estados y con un
-    // snapshot fresco, para que un partido que pasó a 'live' en ESTA corrida ya
-    // revele — antes esto corría antes de flipear el estado y se revelaba una
-    // corrida tarde (por eso las predicciones se veían "—" durante el vivo).
+    // están 'scheduled'. Se usa la lista EN MEMORIA (ya con los estados que el
+    // Paso 2 acaba de escribir), sin volver a leer la colección, para que un
+    // partido que pasó a 'live' en ESTA corrida revele de una — antes se hacía
+    // antes de flipear el estado y se revelaba una corrida tarde ("—" en vivo).
     let predictionsRevealed = 0;
-    const revealSnap = await db.collection('profetas').doc('matches').collection('matches').get();
-    for (const matchDoc of revealSnap.docs) {
-      const m = matchDoc.data();
+    for (const item of matchList) {
+      const m = item.data;
       const st = matchStatusComputed(m);
       if (st === 'scheduled') continue;
       if (st === 'finished' && m.predictionsFullyRevealed === true) continue;
-      predictionsRevealed += await revealPredictions(matchDoc);
-      if (st === 'finished') { try { await matchDoc.ref.update({ predictionsFullyRevealed: true }); } catch (e) {} }
+      predictionsRevealed += await revealPredictions(item.ref);
+      if (st === 'finished' && m.predictionsFullyRevealed !== true) {
+        try { await item.ref.update({ predictionsFullyRevealed: true }); item.data.predictionsFullyRevealed = true; } catch (e) {}
+      }
     }
 
-    // Paso 4: recalcular sola la tabla de posiciones real desde NUESTROS
-    // partidos FPC terminados (ya no desde BSD — ver updateRealStandings).
+    // Paso 4: recalcular la tabla real desde NUESTROS partidos FPC terminados,
+    // usando la lista en memoria (sin releer). Ver updateRealStandings.
     let standingsMapped = 0;
-    try { standingsMapped = await updateRealStandings(db); } catch (e) { /* no crítico */ }
+    try { standingsMapped = await updateRealStandings(db, matchList.map(it => it.data)); } catch (e) { /* no crítico */ }
 
     res.status(200).json({ ok: true, flippedToLive, predictionsRevealed, updated: updatedCount, finished: finishedCount, standingsMapped, diagnostics });
   } catch (err) {
