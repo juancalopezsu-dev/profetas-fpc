@@ -300,16 +300,17 @@ export default async function handler(req, res) {
     // Paso 2 acaba de escribir), sin volver a leer la colección, para que un
     // partido que pasó a 'live' en ESTA corrida revele de una — antes se hacía
     // antes de flipear el estado y se revelaba una corrida tarde ("—" en vivo).
+    // Las predicciones se cierran al empezar el partido (no entran nuevas una
+    // vez 'live'), así que se revelan UNA vez y se marca predictionsFullyRevealed
+    // para no volver a leer esa subcolección en cada corrida (eso multiplicaba
+    // las lecturas mientras un partido estaba en vivo).
     let predictionsRevealed = 0;
     for (const item of matchList) {
       const m = item.data;
-      const st = matchStatusComputed(m);
-      if (st === 'scheduled') continue;
-      if (st === 'finished' && m.predictionsFullyRevealed === true) continue;
+      if (matchStatusComputed(m) === 'scheduled') continue;
+      if (m.predictionsFullyRevealed === true) continue;
       predictionsRevealed += await revealPredictions(item.ref);
-      if (st === 'finished' && m.predictionsFullyRevealed !== true) {
-        try { await item.ref.update({ predictionsFullyRevealed: true }); item.data.predictionsFullyRevealed = true; } catch (e) {}
-      }
+      try { await item.ref.update({ predictionsFullyRevealed: true }); item.data.predictionsFullyRevealed = true; } catch (e) {}
     }
 
     // Paso 4: recalcular la tabla real desde NUESTROS partidos FPC terminados,
